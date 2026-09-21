@@ -4,3 +4,9 @@ __pycache__/
 .env
 credentials.json
 token.json
+# Respaldos del token (token.json.revocado.bak): mismo secreto adentro.
+token.json*
+logs/
+estado_jobs.json
+historial_chats.json
+latido.json
