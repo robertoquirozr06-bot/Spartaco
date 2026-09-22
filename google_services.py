@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import re
+import unicodedata
 from calendar import monthrange as _monthrange
 from datetime import date, datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
@@ -593,6 +594,608 @@ async def consultar_movimientos(categoria: str = "") -> str:
     if not lineas:
         return "No hay movimientos registrados para ese filtro."
     lineas.append(f"Balance total: {balance:.2f}")
+    return "\n".join(lineas)
+
+
+# --------------------------------------------------------------------------
+# Analisis de gastos (lectura agregada de la hoja de finanzas)
+# --------------------------------------------------------------------------
+# consultar_movimientos devuelve fila por fila: sirve para "que se registro",
+# no para "cuanto llevamos". En cuanto la hoja crece, el listado crudo se come
+# el limite de 3000 caracteres de brain._truncar_resultado (y lo que se corta
+# se corta en silencio, asi que el modelo terminaria sumando sobre datos
+# incompletos sin saberlo) y ademas lo deja haciendo aritmetica a mano, que es
+# justo lo que hace mal. Las tools de aca devuelven los totales ya calculados
+# en Python: el modelo solo los redacta.
+
+_UMBRAL_VARIACION = 0.20      # 20% de cambio para considerarlo digno de mencion
+_UMBRAL_VARIACION_ABS = 5000  # ...siempre que ademas sean al menos $5.000 de diferencia
+_MAX_LINEAS_DESGLOSE = 15
+_MESES_COMPARACION_DEFAULT = 4
+_MINIMO_MOVIMIENTOS_MES = 5   # por debajo de esto, el mes esta medio vacio y el % engaña
+
+# Grupos de equivalencia: distintos nombres para el MISMO gasto. La hoja la
+# escriben tres personas a mano, asi que el mercado ya aparece como 'Mercado',
+# 'mercado' y 'Supermercado'. Se unifican al consultar, sin reescribir la hoja.
+# Agregar un alias nuevo es agregarlo a su tupla.
+_CATEGORIAS_EQUIVALENTES = (
+    ("mercado", "supermercado", "super", "compra mercado"),
+    ("salud", "medicamentos", "medicamento", "medicina", "medicinas", "farmacia", "drogueria"),
+    ("transporte", "transportes", "taxi", "uber", "pasajes", "gasolina"),
+    ("arriendo", "alquiler", "renta"),
+    ("gastos personales", "gasto personal", "personales"),
+    ("bebe", "cosas del bebe"),
+)
+
+# Familias: pedir la clave suma a todos sus miembros, pero pedir un miembro
+# suelto ('internet') sigue devolviendo solo ese. Por eso NO son equivalencias:
+# internet y luz son ambos servicios, pero no son el mismo gasto.
+_CATEGORIAS_FAMILIA = {
+    "servicios": ("luz", "agua", "gas", "energia", "internet", "acueducto", "servicios publicos"),
+    "servicios publicos": ("luz", "agua", "gas", "energia", "internet", "acueducto"),
+    "celular": ("plan de celular", "plan celular", "telefono"),
+    "salud": ("plan complementario", "planilla", "mi planilla", "eps"),
+}
+
+# Palabras que no distinguen un concepto de otro entre meses: si no se quitan,
+# "Transporte agosto" y "Transporte septiembre" cuentan como conceptos
+# distintos y quedan sin comparar, que es lo contrario de lo que se busca al
+# preguntar si algo subio de precio.
+_RUIDO_CONCEPTO = frozenset(
+    ("recurrente", "compra", "compras", "pago", "pagos", "de", "del", "la", "el", "en", "y")
+    + _MESES
+)
+
+
+def _normalizar(texto: str) -> str:
+    """Minusculas, sin tildes y con los espacios colapsados, para poder
+    comparar lo que tres personas distintas teclean a mano en la misma hoja."""
+    plano = unicodedata.normalize("NFKD", str(texto))
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    return " ".join(plano.lower().split())
+
+
+def _frase_en(frase: str, texto: str) -> bool:
+    """True si `frase` aparece dentro de `texto` como palabras completas y seguidas.
+
+    Se compara por palabras y no con un `in` de substring a secas porque el
+    substring da falsos positivos silenciosos: "gas" esta dentro de "gastos
+    personales", asi que preguntar por los servicios sumaria los gastos
+    personales sin que nadie lo note.
+    """
+    palabras_texto = texto.split()
+    palabras_frase = frase.split()
+    if not palabras_frase or len(palabras_frase) > len(palabras_texto):
+        return False
+    return any(
+        palabras_texto[i:i + len(palabras_frase)] == palabras_frase
+        for i in range(len(palabras_texto) - len(palabras_frase) + 1)
+    )
+
+
+def _categorias_coincidentes(consulta: str, presentes) -> set:
+    """Las categorias tal como estan escritas en la hoja que corresponden a lo
+    que se pregunto. Conjunto vacio si no coincide ninguna."""
+    objetivo = _normalizar(consulta)
+    if not objetivo:
+        return set(presentes)
+
+    nombres = {objetivo}
+    for grupo in _CATEGORIAS_EQUIVALENTES:
+        if objetivo in grupo:
+            nombres.update(grupo)
+    for miembro in _CATEGORIAS_FAMILIA.get(objetivo, ()):
+        nombres.add(miembro)
+        for grupo in _CATEGORIAS_EQUIVALENTES:
+            if miembro in grupo:
+                nombres.update(grupo)
+
+    coinciden = set()
+    for cruda in presentes:
+        norma = _normalizar(cruda)
+        if any(_frase_en(n, norma) or _frase_en(norma, n) for n in nombres):
+            coinciden.add(cruda)
+    return coinciden
+
+
+def _concepto(descripcion: str) -> str:
+    """Reduce una descripcion a su concepto, para poder rastrearlo entre meses.
+
+    "Internet (recurrente)" de este mes y el del mes pasado tienen que caer en
+    el mismo concepto, o no hay con que comparar el precio.
+    """
+    plano = _normalizar(re.sub(r"[()\[\].,;:]", " ", descripcion))
+    palabras = [p for p in plano.split() if p not in _RUIDO_CONCEPTO and not p.isdigit()]
+    return " ".join(palabras) or plano
+
+
+def _fmt_monto(valor: float) -> str:
+    """'$182,000', con el mismo formato que ya usan las celdas de la hoja."""
+    if abs(valor - round(valor)) < 0.005:
+        return f"${round(valor):,}"
+    return f"${valor:,.2f}"
+
+
+def _fmt_variacion(nuevo: float, viejo: float) -> str:
+    """'+12.5%', o una nota honesta cuando no hay base contra que comparar."""
+    if viejo == 0:
+        return "antes estaba en $0, no hay base para un %"
+    return f"{(nuevo - viejo) / abs(viejo) * 100:+.1f}%"
+
+
+def _parsear_fecha(texto: str) -> date | None:
+    """La celda de fecha como `date`, o None si no se puede leer."""
+    limpio = str(texto).strip()
+    for formato in _FORMATOS_FECHA:
+        try:
+            return datetime.strptime(limpio, formato).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _limites_periodo(desde: str, hasta: str) -> tuple[date | None, date | None, str | None]:
+    """Convierte desde/hasta en un par de `date`, o (None, None, aviso).
+
+    Acepta tanto un dia ('2026-09-04') como un mes entero ('2026-09'), que es
+    como se suele preguntar ("el gasto de septiembre").
+    """
+    def _limite(texto: str, es_inicio: bool) -> tuple[date | None, str | None]:
+        limpio = str(texto).strip()
+        if not limpio:
+            return None, None
+        if re.fullmatch(r"\d{4}-\d{2}", limpio):
+            anio, mes = int(limpio[:4]), int(limpio[5:7])
+            dia = 1 if es_inicio else _monthrange(anio, mes)[1]
+            return date(anio, mes, dia), None
+        parseada = _parsear_fecha(limpio)
+        if parseada is None:
+            return None, f"No entendi la fecha '{limpio}'. Usa 'YYYY-MM-DD' o 'YYYY-MM'."
+        return parseada, None
+
+    inicio, aviso = _limite(desde, True)
+    if aviso:
+        return None, None, aviso
+    fin, aviso = _limite(hasta, False)
+    if aviso:
+        return None, None, aviso
+    if inicio and fin and inicio > fin:
+        return None, None, f"El rango esta al reves: '{desde}' es posterior a '{hasta}'."
+    return inicio, fin, None
+
+
+async def _leer_movimientos() -> tuple[dict | None, str | None]:
+    """Lee la hoja de finanzas y devuelve ({movimientos, descartadas}, None).
+
+    Cada movimiento es un dict ya parseado (monto float, fecha `date`). Las
+    filas ilegibles se descartan pero se cuentan, para poder avisarlo en vez de
+    entregar un total incompleto en silencio.
+    """
+    if not FINANCE_SHEET_ID:
+        return None, "No hay una hoja de finanzas configurada todavia (falta FINANCE_SHEET_ID en .env)."
+
+    _, _, sheets = _client_apis()
+
+    def _leer():
+        return sheets.spreadsheets().values().get(
+            spreadsheetId=FINANCE_SHEET_ID,
+            range=f"{FINANCE_SHEET_TAB}!A:F",
+        ).execute(num_retries=2)
+
+    try:
+        resultado = await asyncio.to_thread(_leer)
+    except HttpError:
+        logger.exception("No se pudo leer la pestana '%s'", FINANCE_SHEET_TAB)
+        return None, (
+            f"No pude leer la pestana '{FINANCE_SHEET_TAB}' de la hoja de finanzas. "
+            "Revisa que exista y que siga compartida."
+        )
+
+    movimientos, descartadas = [], 0
+    for fila in resultado.get("values", [])[1:]:  # la fila 1 son encabezados
+        if len(fila) < 5:
+            descartadas += 1
+            continue
+        fecha_txt, descripcion, categoria, monto, tipo = (str(c).strip() for c in fila[:5])
+        fecha = _parsear_fecha(fecha_txt)
+        if fecha is None:
+            descartadas += 1
+            continue
+        try:
+            monto_num = _parsear_monto(monto)
+        except ValueError:
+            descartadas += 1
+            continue
+        movimientos.append({
+            "fecha": fecha,
+            "mes": fecha.strftime("%Y-%m"),
+            "descripcion": descripcion,
+            "categoria": categoria,
+            "concepto": _concepto(descripcion),
+            "monto": monto_num,
+            "tipo": tipo.lower() or "gasto",
+            "persona": str(fila[5]).strip() if len(fila) > 5 else "",
+        })
+
+    movimientos.sort(key=lambda m: m["fecha"])
+    return {"movimientos": movimientos, "descartadas": descartadas}, None
+
+
+def _filtrar(movimientos, inicio, fin, categorias, persona_norm, tipo):
+    """Aplica los filtros de una consulta. `categorias`=None significa todas."""
+    filtrados = []
+    for m in movimientos:
+        if tipo and m["tipo"] != tipo:
+            continue
+        if inicio and m["fecha"] < inicio:
+            continue
+        if fin and m["fecha"] > fin:
+            continue
+        if categorias is not None and m["categoria"] not in categorias:
+            continue
+        if persona_norm and _normalizar(m["persona"]) != persona_norm:
+            continue
+        filtrados.append(m)
+    return filtrados
+
+
+def _encabezado_periodo(movimientos, inicio, fin) -> str:
+    """Describe el periodo REALMENTE cubierto por los datos, no el pedido.
+
+    Importa la diferencia: si preguntan por el año y la hoja solo tiene dos
+    meses, decir "2026" invita a leer el total como si faltara plata.
+    """
+    if not movimientos:
+        return "sin datos"
+    primera, ultima = movimientos[0]["fecha"], movimientos[-1]["fecha"]
+    pedido = ""
+    if inicio or fin:
+        pedido = f" (pedido: {inicio.isoformat() if inicio else 'inicio'} a {fin.isoformat() if fin else 'hoy'})"
+    return f"{primera.isoformat()} a {ultima.isoformat()}{pedido}"
+
+
+def _montos_dudosos(movimientos) -> str:
+    """Senala montos que casi seguro son un error de tecleo en la hoja.
+
+    Dos senales, ninguna inventada: un movimiento en $0 (pasa cuando se
+    confirma un pago recurrente al que nunca se le puso monto) y un monto con
+    centavos, porque aca nadie registra centavos -- '$62.83' en una hoja donde
+    todo esta en decenas de miles es un '$62,830' al que se le fue una tecla.
+    No se corrigen ni se excluyen del total: se avisan, porque un solo monto
+    mal tecleado desvia el promedio y dispara una falsa alarma de precios.
+    """
+    ceros = [m for m in movimientos if m["monto"] == 0]
+    centavos = [m for m in movimientos if m["monto"] and abs(m["monto"] - round(m["monto"])) > 0.004]
+    partes = []
+    if ceros:
+        detalle = ", ".join(f"{m['descripcion']} ({m['fecha'].isoformat()})" for m in ceros[:3])
+        partes.append(f"{len(ceros)} movimiento(s) quedaron registrados en $0: {detalle}")
+    if centavos:
+        detalle = ", ".join(
+            f"{m['descripcion']} en {_fmt_monto(m['monto'])} ({m['fecha'].isoformat()})"
+            for m in centavos[:3]
+        )
+        partes.append(f"{len(centavos)} monto(s) traen centavos, revisa que no falte un digito: {detalle}")
+    if not partes:
+        return ""
+    return "Revisar en la hoja: " + "; ".join(partes) + "."
+
+
+async def resumen_gastos(
+    desde: str = "",
+    hasta: str = "",
+    categoria: str = "",
+    persona: str = "",
+    agrupar_por: str = "categoria",
+    tipo: str = "gasto",
+) -> str:
+    """Suma los gastos de la hoja y los desglosa, en vez de listarlos uno por uno.
+
+    Es la herramienta para "cuanto gastamos en mercado este mes", "cuanto lleva
+    registrado Leidy" o "en que se nos va la plata": devuelve totales ya
+    calculados, no filas sueltas.
+
+    Args:
+      desde: Inicio del periodo, 'YYYY-MM-DD' o 'YYYY-MM' (mes completo).
+        Vacio = desde el primer movimiento registrado.
+      hasta: Fin del periodo, mismo formato. Vacio = hasta el ultimo registrado.
+      categoria: Filtra por categoria, ej. 'mercado'. Tolera mayusculas,
+        tildes y sinonimos ('supermercado' cuenta como 'mercado'). Vacio = todas.
+      persona: Filtra por quien REGISTRO el movimiento en el chat (columna
+        'Registrado por'), ej. 'Leidy'. Vacio = todas.
+      agrupar_por: Como desglosar el total: 'categoria', 'mes', 'persona' o
+        'concepto'. Por defecto 'categoria'.
+      tipo: 'gasto' (por defecto), 'ingreso', o 'ambos' para incluir los dos.
+
+    Returns:
+      Texto con el total, el promedio y el desglose ordenado de mayor a menor,
+      o un aviso si la hoja no esta configurada o el filtro no encontro nada.
+    """
+    datos, aviso = await _leer_movimientos()
+    if aviso:
+        return aviso
+
+    inicio, fin, aviso = _limites_periodo(desde, hasta)
+    if aviso:
+        return aviso
+
+    todos = datos["movimientos"]
+    if not todos:
+        return "La hoja de finanzas todavia no tiene ningun movimiento registrado."
+
+    categorias = None
+    if categoria:
+        categorias = _categorias_coincidentes(categoria, {m["categoria"] for m in todos})
+        if not categorias:
+            disponibles = sorted({m["categoria"] for m in todos if m["categoria"]})
+            return (
+                f"No hay ninguna categoria que coincida con '{categoria}'. "
+                f"Las que existen en la hoja son: {', '.join(disponibles)}."
+            )
+
+    persona_norm = _normalizar(persona)
+    if persona_norm and persona_norm not in {_normalizar(m["persona"]) for m in todos}:
+        quienes = sorted({m["persona"] for m in todos if m["persona"]})
+        return (
+            f"Nadie con el nombre '{persona}' aparece en la columna 'Registrado por'. "
+            f"Los nombres que hay son: {', '.join(quienes)}."
+        )
+
+    tipo_norm = _normalizar(tipo)
+    if tipo_norm in ("ambos", "todos"):
+        tipo_norm = ""
+    filtrados = _filtrar(todos, inicio, fin, categorias, persona_norm, tipo_norm)
+    if not filtrados:
+        return "No hay movimientos que cumplan ese filtro (revisa el periodo, la categoria o el nombre)."
+
+    total = sum(m["monto"] for m in filtrados)
+    claves = {
+        "categoria": lambda m: m["categoria"] or "(sin categoria)",
+        "mes": lambda m: m["mes"],
+        "persona": lambda m: m["persona"] or "(sin registrar quien)",
+        "concepto": lambda m: m["concepto"] or m["descripcion"],
+    }
+    clave = claves.get(_normalizar(agrupar_por), claves["categoria"])
+
+    acumulado: dict[str, list[float]] = {}
+    for m in filtrados:
+        grupo = acumulado.setdefault(clave(m), [0.0, 0])
+        grupo[0] += m["monto"]
+        grupo[1] += 1
+
+    # Por mes se ordena cronologicamente (una serie de tiempo desordenada por
+    # monto no se puede leer); en el resto, lo caro primero.
+    por_mes = clave is claves["mes"]
+    filas = sorted(acumulado.items(), key=(lambda kv: kv[0]) if por_mes else (lambda kv: -kv[1][0]))
+
+    etiqueta_tipo = {"gasto": "Gastos", "ingreso": "Ingresos"}.get(tipo_norm, "Movimientos")
+    titulo = etiqueta_tipo
+    if persona:
+        titulo += f" registrados por {filtrados[0]['persona']}"
+    if categoria:
+        reales = sorted(c for c in categorias if any(m["categoria"] == c for m in filtrados))
+        titulo += f" en '{categoria}'"
+        if len(reales) > 1 or (reales and _normalizar(reales[0]) != _normalizar(categoria)):
+            titulo += f" (suma las categorias: {', '.join(reales)})"
+
+    lineas = [
+        f"{titulo} | {_encabezado_periodo(filtrados, inicio, fin)} | {len(filtrados)} movimientos",
+        f"Total: {_fmt_monto(total)} | Promedio por movimiento: {_fmt_monto(round(total / len(filtrados)))}",
+        "",
+        f"Por {_normalizar(agrupar_por) if _normalizar(agrupar_por) in claves else 'categoria'}:",
+    ]
+    for nombre, (suma, cuantos) in filas[:_MAX_LINEAS_DESGLOSE]:
+        porcentaje = f" | {suma / total * 100:.0f}% del total" if total else ""
+        lineas.append(f"- {nombre}: {_fmt_monto(suma)} ({cuantos} mov.){porcentaje}")
+    if len(filas) > _MAX_LINEAS_DESGLOSE:
+        resto = sum(suma for _, (suma, _) in filas[_MAX_LINEAS_DESGLOSE:])
+        lineas.append(f"- (+{len(filas) - _MAX_LINEAS_DESGLOSE} mas, en total {_fmt_monto(resto)})")
+
+    # "Gasto de Leidy" se resuelve por la columna 'Registrado por', pero la hoja
+    # tiene filas como "Mercado Leidy" que registro otra persona. No se suman
+    # (seria cambiar la pregunta), pero callarlas daria un total enganoso.
+    if persona_norm:
+        otros = [
+            m for m in _filtrar(todos, inicio, fin, categorias, "", tipo_norm)
+            if _normalizar(m["persona"]) != persona_norm
+            and _frase_en(persona_norm, _normalizar(m["descripcion"]))
+        ]
+        if otros:
+            suma_otros = sum(m["monto"] for m in otros)
+            lineas.append(
+                f"\nNota: hay {len(otros)} movimiento(s) mas que mencionan a {persona} en la "
+                f"descripcion pero los registro otra persona ({_fmt_monto(suma_otros)}). "
+                "No estan sumados arriba."
+            )
+
+    dudosos = _montos_dudosos(filtrados)
+    if dudosos:
+        lineas.append("\n" + dudosos)
+
+    if datos["descartadas"]:
+        lineas.append(
+            f"\nAviso: {datos['descartadas']} fila(s) de la hoja quedaron fuera por tener "
+            "la fecha o el monto ilegibles."
+        )
+    return "\n".join(lineas)
+
+
+async def comparar_gastos(categoria: str = "", persona: str = "", meses: int = 0) -> str:
+    """Compara los gastos mes a mes y senala que subio o bajo mas.
+
+    Es la herramienta para "se disparo algo de precio", "estamos gastando mas
+    que el mes pasado" o "como viene el mercado comparado con antes".
+
+    Sin categoria compara el total de cada categoria entre meses. Con una
+    categoria entra al detalle y rastrea cada concepto dentro de ella (ej. el
+    'Internet (recurrente)' de un mes contra el del anterior).
+
+    Args:
+      categoria: Categoria a mirar en detalle, ej. 'mercado'. Vacio = compara
+        todas las categorias entre si.
+      persona: Limita la comparacion a quien registro los movimientos
+        (columna 'Registrado por'). Vacio = todos.
+      meses: Cuantos meses con datos mirar hacia atras. 0 = los ultimos 4.
+
+    Returns:
+      Texto con el total por mes, lo que mas cambio y una nota sobre que tanto
+      se puede concluir, o un aviso si no hay al menos dos meses con datos.
+    """
+    datos, aviso = await _leer_movimientos()
+    if aviso:
+        return aviso
+
+    todos = datos["movimientos"]
+    if not todos:
+        return "La hoja de finanzas todavia no tiene ningun movimiento registrado."
+
+    categorias = None
+    if categoria:
+        categorias = _categorias_coincidentes(categoria, {m["categoria"] for m in todos})
+        if not categorias:
+            disponibles = sorted({m["categoria"] for m in todos if m["categoria"]})
+            return (
+                f"No hay ninguna categoria que coincida con '{categoria}'. "
+                f"Las que existen en la hoja son: {', '.join(disponibles)}."
+            )
+
+    persona_norm = _normalizar(persona)
+    if persona_norm and persona_norm not in {_normalizar(m["persona"]) for m in todos}:
+        quienes = sorted({m["persona"] for m in todos if m["persona"]})
+        return (
+            f"Nadie con el nombre '{persona}' aparece en la columna 'Registrado por'. "
+            f"Los nombres que hay son: {', '.join(quienes)}."
+        )
+
+    gastos = _filtrar(todos, None, None, categorias, persona_norm, "gasto")
+    if not gastos:
+        return "No hay gastos que cumplan ese filtro, asi que no hay nada que comparar."
+
+    try:
+        ventana = int(meses)
+    except (TypeError, ValueError):
+        ventana = 0
+    ventana = ventana if ventana > 0 else _MESES_COMPARACION_DEFAULT
+    meses_con_datos = sorted({m["mes"] for m in gastos})[-ventana:]
+    if len(meses_con_datos) < 2:
+        return (
+            f"Solo hay gastos de un mes ({meses_con_datos[0]}), asi que todavia no hay "
+            "meses anteriores contra que comparar. Con el proximo mes registrado ya se puede."
+        )
+
+    gastos = [m for m in gastos if m["mes"] in meses_con_datos]
+    mes_actual, meses_previos = meses_con_datos[-1], meses_con_datos[:-1]
+
+    # Sin categoria se compara categoria contra categoria; con categoria, se
+    # entra al detalle y se compara concepto contra concepto.
+    llave = "concepto" if categoria else "categoria"
+    serie: dict[str, dict[str, float]] = {}
+    total_por_mes: dict[str, float] = {mes: 0.0 for mes in meses_con_datos}
+    conteo_por_mes: dict[str, int] = {mes: 0 for mes in meses_con_datos}
+    for m in gastos:
+        por_mes = serie.setdefault(m[llave] or "(sin nombre)", {})
+        por_mes[m["mes"]] = por_mes.get(m["mes"], 0.0) + m["monto"]
+        total_por_mes[m["mes"]] += m["monto"]
+        conteo_por_mes[m["mes"]] += 1
+
+    ambito = f"Categoria '{categoria}'" if categoria else "Todas las categorias"
+    if persona:
+        ambito += f", solo lo registrado por {persona}"
+    lineas = [
+        f"{ambito} | comparando {len(meses_con_datos)} meses con datos: {', '.join(meses_con_datos)}",
+        "Total por mes: " + " | ".join(f"{mes} {_fmt_monto(total_por_mes[mes])}" for mes in meses_con_datos),
+    ]
+
+    base_previa = [total_por_mes[mes] for mes in meses_previos]
+    promedio_previo = sum(base_previa) / len(base_previa)
+    lineas.append(
+        f"{mes_actual} va en {_fmt_monto(total_por_mes[mes_actual])} contra un promedio de "
+        f"{_fmt_monto(promedio_previo)} en los meses anteriores "
+        f"({_fmt_variacion(total_por_mes[mes_actual], promedio_previo)})."
+    )
+
+    etiqueta = "conceptos" if categoria else "categorias"
+    subidas, nuevos, desaparecidos = [], [], []
+    comparables = 0
+    for nombre, por_mes in serie.items():
+        actual = por_mes.get(mes_actual, 0.0)
+        previos = [por_mes[mes] for mes in meses_previos if mes in por_mes]
+        if not previos:
+            if actual:
+                nuevos.append((nombre, actual))
+            continue
+        comparables += 1
+        promedio = sum(previos) / len(previos)
+        if actual == 0:
+            desaparecidos.append((nombre, promedio))
+            continue
+        diferencia = actual - promedio
+        if abs(diferencia) >= _UMBRAL_VARIACION_ABS and abs(diferencia) >= promedio * _UMBRAL_VARIACION:
+            subidas.append((abs(diferencia), nombre, actual, promedio, len(previos)))
+
+    if subidas:
+        subidas.sort(reverse=True)
+        lineas.append(f"\nLo que mas cambio en {mes_actual} (vs. promedio de los meses anteriores):")
+        for _, nombre, actual, promedio, cuantos in subidas[:_MAX_LINEAS_DESGLOSE]:
+            flecha = "subio" if actual > promedio else "bajo"
+            lineas.append(
+                f"- {nombre}: {_fmt_monto(promedio)} -> {_fmt_monto(actual)} "
+                f"({flecha} {_fmt_variacion(actual, promedio)}, promedio de "
+                f"{cuantos} {'mes' if cuantos == 1 else 'meses'} atras)"
+            )
+    elif comparables == 1:
+        lineas.append(
+            f"\nSolo 1 de las {etiqueta} tiene historial en mas de un mes, y no cambio mas de "
+            f"{_UMBRAL_VARIACION:.0%} frente a su promedio anterior."
+        )
+    elif comparables:
+        lineas.append(
+            f"\nNinguna de las {comparables} {etiqueta} con historial en mas de un mes cambio "
+            f"mas de {_UMBRAL_VARIACION:.0%} frente a su promedio anterior."
+        )
+    else:
+        lineas.append(
+            f"\nNinguna de las {etiqueta} de {mes_actual} aparece tambien en los meses "
+            "anteriores, asi que todavia no hay con que comparar precios: lo de abajo es lo "
+            "que hay de nuevo, no lo que subio."
+        )
+
+    if nuevos:
+        nuevos.sort(key=lambda x: -x[1])
+        detalle = ", ".join(f"{n} ({_fmt_monto(v)})" for n, v in nuevos[:5])
+        lineas.append(f"\nAparecen por primera vez en {mes_actual}: {detalle}.")
+    if desaparecidos:
+        desaparecidos.sort(key=lambda x: -x[1])
+        detalle = ", ".join(f"{n} (venia en {_fmt_monto(v)})" for n, v in desaparecidos[:5])
+        lineas.append(f"Sin registro este mes: {detalle}.")
+
+    flacos = (
+        [mes for mes in meses_con_datos if conteo_por_mes[mes] < _MINIMO_MOVIMIENTOS_MES]
+        if not categoria and not persona else []
+    )
+    if flacos:
+        detalle = ", ".join(f"{mes} ({conteo_por_mes[mes]} mov.)" for mes in flacos)
+        verbo = "tiene" if len(flacos) == 1 else "tienen"
+        lineas.append(
+            f"\nOjo con el porcentaje: {detalle} casi no {verbo} movimientos registrados, asi "
+            "que la diferencia mide sobre todo lo que falto por registrar, no lo que cambio "
+            "el gasto."
+        )
+
+    if mes_actual == datetime.now(ZONA_HORARIA).strftime("%Y-%m"):
+        lineas.append(
+            f"\nOjo: {mes_actual} es el mes en curso y todavia no termina, asi que va a "
+            "quedar corto frente a meses completos."
+        )
+    lineas.append(
+        "La hoja guarda el monto gastado, no el precio unitario ni la cantidad: una subida "
+        "puede ser que algo valga mas o que se haya comprado mas."
+    )
+    if datos["descartadas"]:
+        lineas.append(
+            f"Aviso: {datos['descartadas']} fila(s) quedaron fuera por tener la fecha o el "
+            "monto ilegibles."
+        )
     return "\n".join(lineas)
 
 

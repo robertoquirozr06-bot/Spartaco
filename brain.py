@@ -104,6 +104,26 @@ SYSTEM_PROMPT = (
     "servicios, arriendo, etc.) y NO tienen una division fija (ni 50/50 ni ningun porcentaje): la "
     "pareja decide en el momento quien paga cada uno. Tu rol ahi es solo recordar el vencimiento y "
     "registrar quien confirmo, nunca asumas ni sugieras una division automatica del monto.\n\n"
+    "Para preguntas sobre gastos ('cuanto gastamos en mercado', 'cuanto lleva Leidy', 'en que se "
+    "nos va la plata', 'subio algo de precio') usa resumen_gastos y comparar_gastos, NUNCA "
+    "consultar_movimientos: esas dos ya devuelven los totales calculados, mientras que "
+    "consultar_movimientos devuelve fila por fila y se corta sola cuando la hoja crece, asi que "
+    "sumar a mano sobre eso da cifras mal. Deja consultar_movimientos solo para cuando pidan ver "
+    "los movimientos uno por uno. Reglas:\n"
+    "- Traduce el periodo a 'YYYY-MM' o 'YYYY-MM-DD' usando la fecha del contexto ('este mes', "
+    "'septiembre', 'los ultimos tres meses'). Si no mencionan periodo, no inventes uno: deja "
+    "'desde'/'hasta' vacios y se toma todo el historico.\n"
+    "- Para 'gasto mensual en X' usa resumen_gastos con categoria='X' y agrupar_por='mes'.\n"
+    "- 'El gasto de Leidy' significa lo que Leidy REGISTRO en el chat (columna 'Registrado por'), "
+    "que no es lo mismo que lo que se gasto en ella. La herramienta avisa al pie si hay "
+    "movimientos que la mencionan pero los registro otra persona; si ese aviso aparece, pasalo "
+    "al grupo en vez de omitirlo, que ahi suele estar la diferencia que no les cuadra.\n"
+    "- Repite tal cual los avisos de la herramienta sobre datos de la hoja (montos en $0, montos "
+    "con centavos, filas ilegibles, mes en curso sin terminar): es informacion que solo ellos "
+    "pueden corregir, y sin eso una comparacion de precios puede ser una falsa alarma.\n"
+    "- La hoja guarda el monto gastado, no el precio unitario ni la cantidad. Cuando reportes una "
+    "subida, dilo en esos terminos ('se gasto mas en mercado') y no afirmes que algo subio de "
+    "precio salvo que sea un concepto fijo y repetido (internet, luz, arriendo).\n\n"
     "Leidy esta en etapa de gestacion y tiene 4 medicamentos con horario fijo (EUTIROX, Prenatal, "
     "Caltrate Plus y Acido Folico). Espartaco ya avisa solo por Telegram a la hora de cada uno, con "
     "un boton de confirmacion '✅ Ya lo tome', asi que no necesitas crear recordatorios manuales para "
@@ -330,6 +350,53 @@ _TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "categoria": {"type": "string", "description": "Si se especifica, filtra por esa categoria."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resumen_gastos",
+            "description": (
+                "Suma y desglosa los gastos de la hoja de finanzas en vez de listarlos uno por uno. "
+                "Usala para 'cuanto gastamos en mercado este mes', 'cuanto lleva registrado Leidy' o "
+                "'en que se nos va la plata'. Devuelve totales ya calculados: no vuelvas a sumarlos tu."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "desde": {"type": "string", "description": "Inicio del periodo, 'YYYY-MM-DD' o 'YYYY-MM' (mes completo). Vacio = desde el primer movimiento."},
+                    "hasta": {"type": "string", "description": "Fin del periodo, mismo formato. Vacio = hasta el ultimo movimiento."},
+                    "categoria": {"type": "string", "description": "Categoria a filtrar, ej. 'mercado'. Tolera mayusculas, tildes y sinonimos. Vacio = todas."},
+                    "persona": {"type": "string", "description": "Filtra por quien REGISTRO el movimiento en el chat, ej. 'Leidy'. Vacio = todas."},
+                    "agrupar_por": {"type": "string", "enum": ["categoria", "mes", "persona", "concepto"], "description": "Como desglosar el total. Usa 'mes' cuando pregunten por el gasto mensual."},
+                    # Sin cadena vacia en el enum: Gemini rechaza con 400 un enum
+                    # que traiga "" y, como el schema de tools viaja en CADA
+                    # request, eso no tumbaba solo las finanzas -- tumbaba
+                    # cualquier conversacion que cayera en un modelo Gemini.
+                    "tipo": {"type": "string", "enum": ["gasto", "ingreso", "ambos"], "description": "'gasto' por defecto; 'ambos' suma ingresos y gastos."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "comparar_gastos",
+            "description": (
+                "Compara los gastos mes a mes y senala que subio o bajo mas. Usala cuando pregunten "
+                "si algo se disparo de precio, si estan gastando mas que el mes pasado, o como viene "
+                "una categoria comparada con antes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "categoria": {"type": "string", "description": "Categoria a mirar en detalle, ej. 'mercado'. Vacio = compara todas las categorias entre si."},
+                    "persona": {"type": "string", "description": "Limita la comparacion a quien registro los movimientos. Vacio = todos."},
+                    "meses": {"type": "integer", "description": "Cuantos meses con datos mirar hacia atras. 0 o vacio = los ultimos 4."},
                 },
                 "required": [],
             },
@@ -660,6 +727,8 @@ _DISPATCH = {
     "completear_tarea": google_services.completar_tarea,
     "registrar_movimiento": google_services.registrar_movimiento,
     "consultar_movimientos": google_services.consultar_movimientos,
+    "resumen_gastos": google_services.resumen_gastos,
+    "comparar_gastos": google_services.comparar_gastos,
     "agregar_pago_recurrente": google_services.agregar_pago_recurrente,
     "listar_pagos_recurrentes": google_services.listar_pagos_recurrentes,
     "confirmar_pago_recurrente": google_services.confirmar_pago_recurrente,
