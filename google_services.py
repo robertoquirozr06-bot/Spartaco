@@ -22,6 +22,7 @@ import httplib2
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import HttpRequest
 
 from google_auth import get_credentials
 
@@ -100,13 +101,33 @@ def _authorized_http(creds):
 
 
 def _client_apis():
-    """Construye (una sola vez) los clientes de Calendar/Tasks/Sheets."""
+    """Construye (una sola vez) los clientes de Calendar/Tasks/Sheets.
+
+    httplib2.Http NO es thread-safe, y todas las llamadas corren en hilos de
+    asyncio.to_thread que se solapan (un mensaje dispara en paralelo los jobs de
+    recordatorios). Con un Http compartido por servicio, dos peticiones
+    simultaneas usaban la misma conexion SSL: las respuestas se cruzaban (el
+    2026-09-29 un insert de evento recibio la respuesta del patch de otro
+    evento y la cita nunca se creo) y OpenSSL corrompia el heap, tumbando el
+    proceso con 0xc0000374 / 0xc0000005. Por eso cada peticion recibe su
+    propio Http via requestBuilder (el patron que documenta googleapiclient
+    para hilos); los objetos de servicio si se comparten, son inmutables.
+    """
     global _calendar, _tasks, _sheets
     if _calendar is None:
         creds = get_credentials()
-        _calendar = build("calendar", "v3", http=_authorized_http(creds))
-        _tasks = build("tasks", "v1", http=_authorized_http(creds))
-        _sheets = build("sheets", "v4", http=_authorized_http(creds))
+
+        def _request_con_http_propio(_http, *args, **kwargs):
+            return HttpRequest(_authorized_http(creds), *args, **kwargs)
+
+        def _build(api, version):
+            return build(
+                api, version, http=_authorized_http(creds), requestBuilder=_request_con_http_propio
+            )
+
+        _calendar = _build("calendar", "v3")
+        _tasks = _build("tasks", "v1")
+        _sheets = _build("sheets", "v4")
     return _calendar, _tasks, _sheets
 
 
