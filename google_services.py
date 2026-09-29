@@ -618,6 +618,42 @@ async def consultar_movimientos(categoria: str = "") -> str:
     return "\n".join(lineas)
 
 
+async def categorias_conocidas() -> list[str]:
+    """Categorias distintas ya usadas en la hoja de finanzas, para que el
+    comando /gasto de Telegram (main.py) ofrezca botones con las categorias
+    reales en vez de dejar texto libre -- eso es lo que hoy evita que la hoja
+    se llene de variantes ('mercado'/'Mercado'/'super') para lo mismo.
+
+    Deduplicadas ignorando mayusculas/tildes (se queda con la primera grafia
+    vista de cada una) y ordenadas alfabeticamente.
+    """
+    datos, aviso = await _leer_movimientos()
+    if aviso or not datos["movimientos"]:
+        return []
+    vistas: dict[str, str] = {}
+    for m in datos["movimientos"]:
+        cat = m["categoria"].strip()
+        if cat and _normalizar(cat) not in vistas:
+            vistas[_normalizar(cat)] = cat
+    return [vistas[clave] for clave in sorted(vistas)]
+
+
+async def personas_conocidas() -> list[str]:
+    """Nombres distintos que aparecen en 'Registrado por' en la hoja de
+    finanzas, para el filtro 'por persona' del comando /gastos (main.py).
+    Mismo criterio de deduplicado que `categorias_conocidas`.
+    """
+    datos, aviso = await _leer_movimientos()
+    if aviso or not datos["movimientos"]:
+        return []
+    vistas: dict[str, str] = {}
+    for m in datos["movimientos"]:
+        persona = m["persona"].strip()
+        if persona and _normalizar(persona) not in vistas:
+            vistas[_normalizar(persona)] = persona
+    return [vistas[clave] for clave in sorted(vistas)]
+
+
 # --------------------------------------------------------------------------
 # Analisis de gastos (lectura agregada de la hoja de finanzas)
 # --------------------------------------------------------------------------
@@ -1290,6 +1326,17 @@ def _parsear_monto(valor) -> float:
     return float(re.sub(r"[,.]", "", texto))
 
 
+def parsear_monto(valor) -> float:
+    """Wrapper publico de `_parsear_monto`, para el comando /gasto de Telegram
+    (main.py): mismo criterio tolerante ('$78,101', '6.800', '15000') que ya
+    usa la lectura de la hoja, para no reinventar una segunda regla distinta.
+
+    Raises:
+      ValueError: si `valor` no tiene ningun numero utilizable.
+    """
+    return _parsear_monto(valor)
+
+
 def _fila_desde_rango(rango: str) -> int | None:
     """Extrae el numero de fila de un 'updatedRange' de Sheets, ej. "'Pagos Recurrentes'!A5:J5" -> 5."""
     if not rango:
@@ -1893,6 +1940,35 @@ async def listar_medicamentos() -> str:
     return "\n".join(lineas)
 
 
+async def medicamentos_activos_estructurados() -> tuple[list[dict], str | None]:
+    """Version estructurada de `listar_medicamentos`: por cada medicamento
+    activo devuelve id/nombre/hora/notas/tomado_hoy en vez de texto, para que
+    el comando /medicamentos de Telegram (main.py) arme un boton "Desactivar"
+    por fila sin tener que re-parsear el texto formateado.
+    """
+    filas, aviso = await _leer_filas_medicamentos()
+    if aviso:
+        return [], aviso
+
+    hoy_iso = datetime.now(ZONA_HORARIA).date().isoformat()
+    resultado = []
+    for fila in filas:
+        if not fila or not _celda(fila, 0):
+            continue
+        activo = _celda(fila, 4, "SI").strip().upper() != "NO"
+        if not activo:
+            continue
+        id_, nombre, hora, notas = _celda(fila, 0), _celda(fila, 1), _celda(fila, 2), _celda(fila, 3)
+        resultado.append({
+            "id": id_,
+            "nombre": nombre,
+            "hora": hora,
+            "notas": notas,
+            "tomado_hoy": _celda_fecha_iso(fila, 6) == hoy_iso,
+        })
+    return resultado, None
+
+
 # --------------------------------------------------------------------------
 # Notas personales (memoria de largo plazo, mas alla del historial de chat)
 # --------------------------------------------------------------------------
@@ -2453,3 +2529,32 @@ async def listar_habitos() -> str:
     if not lineas:
         return "No hay habitos de salud/bienestar configurados."
     return "\n".join(lineas)
+
+
+async def habitos_activos_estructurados() -> tuple[list[dict], str | None]:
+    """Version estructurada de `listar_habitos`: por cada habito activo
+    devuelve id/nombre/hora/notas/cumplido_hoy en vez de texto, para que el
+    comando /habitos de Telegram (main.py) arme un boton "Desactivar" por
+    fila sin tener que re-parsear el texto formateado.
+    """
+    filas, aviso = await _leer_filas_habitos()
+    if aviso:
+        return [], aviso
+
+    hoy_iso = datetime.now(ZONA_HORARIA).date().isoformat()
+    resultado = []
+    for fila in filas:
+        if not fila or not _celda(fila, 0):
+            continue
+        activo = _celda(fila, 4, "SI").strip().upper() != "NO"
+        if not activo:
+            continue
+        id_, nombre, hora, notas = _celda(fila, 0), _celda(fila, 1), _celda(fila, 2), _celda(fila, 3)
+        resultado.append({
+            "id": id_,
+            "nombre": nombre,
+            "hora": hora,
+            "notas": notas,
+            "cumplido_hoy": _celda_fecha_iso(fila, 6) == hoy_iso,
+        })
+    return resultado, None

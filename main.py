@@ -1,7 +1,8 @@
 """
-main.py - Nucleo asincrono de Espartaco (Fase 4: Telegram + cerebro via OmniRoute + Google tools)
+main.py - Nucleo asincrono de Espartaco (Fase 4: Telegram + cerebro via DeepSeek + Google tools)
 """
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -47,6 +48,34 @@ LATIDO_PATH = BASE_DIR / "latido.json"
 GRACIA_ARRANQUE_SEG = 90
 _ARRANQUE = datetime.now(ZONA_HORARIA)
 
+# Un solo "turno" para el trabajo contra Google/DeepSeek: un mensaje del chat,
+# un comando directo o un job de recordatorios, nunca dos a la vez. Al
+# despertar el PC se juntan los mensajes atrasados, los jobs que se ponen al
+# dia y la revision por actividad; el 2026-09-29 un insert de cita y el patch
+# del recordatorio de 2h se pisaron y la cita se perdio. Es una fila (FIFO),
+# no una espera fija: cada uno entra cuando el anterior termina, tarde lo que
+# tarde. No es reentrante: nada que ya tenga el turno debe volver a pedirlo.
+_TURNO_GOOGLE = asyncio.Lock()
+
+# Colchon para la rafaga de mensajes atrasados tras un arranque: durante los
+# primeros VENTANA_ATRASADOS_SEG, pausa breve entre mensaje y mensaje para no
+# quemar de golpe la cuota por minuto de Google (Calendar corta con 403) ni
+# la de DeepSeek.
+VENTANA_ATRASADOS_SEG = 60
+PAUSA_ENTRE_ATRASADOS_SEG = 2
+_atendio_mensaje_desde_arranque = False
+
+
+def _en_turno_google(job):
+    """Hace que un job de recordatorios espere su turno antes de correr. El
+    turno se toma FUERA del wait_for del job, asi la espera en la fila no le
+    consume su timeout."""
+    @functools.wraps(job)
+    async def envoltura(*args, **kwargs):
+        async with _TURNO_GOOGLE:
+            return await job(*args, **kwargs)
+    return envoltura
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -76,15 +105,11 @@ import brain
 import google_services
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1").strip()
-OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY", "").strip()
-OMNIROUTE_MODEL = os.getenv("OMNIROUTE_MODEL", "auto/best-chat").strip()
-OMNIROUTE_TRANSCRIPTION_MODEL = os.getenv("OMNIROUTE_TRANSCRIPTION_MODEL", "whisper-large-v3").strip()
-# Modelo con vision para leer imagenes (ver brain.analizar_imagen). El modelo
-# de vision de Groq (llama-4-scout) no esta disponible hoy en el catalogo
-# "live" de OmniRoute para ese proveedor; gemini-3.1-flash-lite via Google AI
-# Studio si respondio bien en pruebas reales.
-OMNIROUTE_VISION_MODEL = os.getenv("OMNIROUTE_VISION_MODEL", "gemini/gemini-3.1-flash-lite").strip()
+# Cerebro (brain.ask) y vision: API directa de DeepSeek desde el 2026-09-29
+# (antes Gemini). Ver brain.py y el comentario de DEEPSEEK_API_KEY en .env
+# sobre el riesgo de no tener respaldo automatico a otro proveedor.
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
 
 _raw_chat_id = os.getenv("ALLOWED_CHAT_ID", "").strip()
 ALLOWED_CHAT_ID = int(_raw_chat_id) if _raw_chat_id else None
@@ -96,10 +121,10 @@ if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "PON_AQUI_TU_TOKEN_DE_BOTFATHER":
     )
     sys.exit(1)
 
-if not OMNIROUTE_API_KEY:
+if not DEEPSEEK_API_KEY:
     logger.critical(
-        "OMNIROUTE_API_KEY no esta definido (o esta vacio) en %s. "
-        "Espartaco necesita el cerebro (via OmniRoute) para funcionar.", ENV_PATH
+        "DEEPSEEK_API_KEY no esta definido (o esta vacio) en %s. "
+        "Espartaco necesita el cerebro (API directa de DeepSeek) para funcionar.", ENV_PATH
     )
     sys.exit(1)
 
@@ -140,9 +165,18 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def _responder_con_cerebro(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, texto: str, remitente: str
 ) -> None:
+    global _atendio_mensaje_desde_arranque
+    if (
+        _atendio_mensaje_desde_arranque
+        and (datetime.now(ZONA_HORARIA) - _ARRANQUE).total_seconds() < VENTANA_ATRASADOS_SEG
+    ):
+        await asyncio.sleep(PAUSA_ENTRE_ATRASADOS_SEG)
+    _atendio_mensaje_desde_arranque = True
+
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     try:
-        respuesta = await brain.ask(chat_id, texto, remitente=remitente)
+        async with _TURNO_GOOGLE:
+            respuesta = await brain.ask(chat_id, texto, remitente=remitente)
     except Exception:
         logger.exception("Fallo al pedirle respuesta al cerebro - chat_id=%s", chat_id)
         await context.bot.send_message(chat_id=chat_id, text="Se me trabo el cerebro un segundo, intenta de nuevo.")
@@ -166,9 +200,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.debug("Mensaje ignorado, chat no autorizado: %s", chat.id)
         return
 
+    # /gasto con "Otra categoria": el siguiente mensaje de texto normal es la
+    # categoria, no algo para el cerebro. Se intercepta aca antes de pasar por
+    # brain.ask() (ver gasto_otra_categoria_callback).
+    pendiente = _gastos_pendientes.get(chat.id)
+    if pendiente is not None and pendiente.get("esperando_categoria_libre"):
+        pendiente["esperando_categoria_libre"] = False
+        pendiente["categoria"] = message.text.strip()
+        texto, teclado = _texto_confirmacion_gasto(pendiente)
+        await context.bot.send_message(chat_id=chat.id, text=texto, reply_markup=teclado)
+        return
+
     remitente = update.effective_user.first_name if update.effective_user else ""
-    context.application.create_task(_revisar_pendientes_por_actividad(context))
     await _responder_con_cerebro(context, chat.id, message.text, remitente)
+    context.application.create_task(_revisar_pendientes_por_actividad(context))
 
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,35 +225,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.debug("Nota de voz ignorada, chat no autorizado: %s", chat.id)
         return
 
-    logger.info("Nota de voz recibida - chat_id=%s duracion=%ss", chat.id, message.voice.duration)
-    remitente = update.effective_user.first_name if update.effective_user else ""
-
-    await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
-    try:
-        archivo = await context.bot.get_file(message.voice.file_id)
-        audio_bytes = bytes(await archivo.download_as_bytearray())
-        texto = await brain.transcribir_audio(audio_bytes)
-    except Exception:
-        logger.exception("Fallo transcribiendo la nota de voz - chat_id=%s", chat.id)
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text="No pude escuchar bien la nota de voz, intenta de nuevo o escribeme el mensaje.",
-        )
-        return
-
-    if not texto:
-        await context.bot.send_message(
-            chat_id=chat.id, text="No detecte voz en esa nota, intenta grabarla de nuevo."
-        )
-        return
-
-    # Muestro lo que entendi antes de responder: si la transcripcion sale mal
-    # (acento, ruido de fondo), se nota de inmediato en vez de que Espartaco
-    # responda algo raro sin dar pistas de por que.
-    await context.bot.send_message(chat_id=chat.id, text=f'🎙️ Escuche: "{texto}"')
-
-    context.application.create_task(_revisar_pendientes_por_actividad(context))
-    await _responder_con_cerebro(context, chat.id, texto, remitente)
+    # Transcripcion apagada desde el 2026-09-29: DeepSeek no acepta audio y se
+    # dio de baja Gemini (que era quien transcribia). Decision de Roberto.
+    logger.info("Nota de voz recibida (transcripcion apagada) - chat_id=%s duracion=%ss", chat.id, message.voice.duration)
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text="🎙️ Por ahora no puedo escuchar notas de voz, solo entiendo texto y fotos. ¿Me lo escribes?",
+    )
 
 
 # Descripcion de la ultima imagen recibida por chat, mientras se espera a que
@@ -289,8 +312,430 @@ async def imagen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Esto es lo que se detecto en la imagen:\n{descripcion}\n"
         "Si falta un dato imprescindible (ej. la fecha u hora), pregunta antes de crear nada."
     )
-    context.application.create_task(_revisar_pendientes_por_actividad(context))
     await _responder_con_cerebro(context, chat.id, prompt, remitente)
+    context.application.create_task(_revisar_pendientes_por_actividad(context))
+
+
+# --------------------------------------------------------------------------
+# Comandos directos (/agenda, /habitos, /medicamentos, /gastos, /gasto): NO
+# pasan por brain.ask() -- llaman a google_services directo y mandan su texto
+# tal cual. Se agregaron porque /menu (arriba) es solo un atajo de teclado que
+# igual paga el prompt completo (~5.3k tokens de system prompt + schema de 28
+# tools) por cada tap; estos comandos, en cambio, cuestan cero tokens de LLM
+# para lo que es una consulta/registro determinista.
+# --------------------------------------------------------------------------
+
+
+async def agenda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not is_chat_allowed(update):
+        logger.warning("Chat no autorizado (chat_id=%s) uso /agenda. Ignorado.", chat.id)
+        return
+    try:
+        texto = await _con_reintento_red(google_services.listar_eventos)
+    except Exception:
+        logger.exception("Fallo consultando la agenda para /agenda - chat_id=%s", chat.id)
+        await context.bot.send_message(
+            chat_id=chat.id, text="No pude consultar el calendario ahora mismo, intenta de nuevo."
+        )
+        return
+    await context.bot.send_message(chat_id=chat.id, text=f"📅 Próximos eventos (7 días):\n{texto}")
+
+
+async def _render_habitos() -> tuple[str, InlineKeyboardMarkup | None]:
+    habitos, aviso = await google_services.habitos_activos_estructurados()
+    if aviso:
+        return aviso, None
+    if not habitos:
+        return "No hay hábitos de salud/bienestar configurados.", None
+    lineas, botones = [], []
+    for h in habitos:
+        estado = "✅ cumplido hoy" if h["cumplido_hoy"] else "pendiente hoy"
+        notas_txt = f" ({h['notas']})" if h["notas"] else ""
+        lineas.append(f"• {h['nombre']} a las {h['hora']}{notas_txt}: {estado}")
+        botones.append([InlineKeyboardButton(f"🚫 Desactivar {h['nombre']}", callback_data=f"hbaja:{h['id']}")])
+    return "🧘 Hábitos activos:\n" + "\n".join(lineas), InlineKeyboardMarkup(botones)
+
+
+async def habitos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not is_chat_allowed(update):
+        logger.warning("Chat no autorizado (chat_id=%s) uso /habitos. Ignorado.", chat.id)
+        return
+    try:
+        texto, teclado = await _con_reintento_red(_render_habitos)
+    except Exception:
+        logger.exception("Fallo consultando habitos para /habitos - chat_id=%s", chat.id)
+        await context.bot.send_message(
+            chat_id=chat.id, text="No pude consultar los hábitos ahora mismo, intenta de nuevo."
+        )
+        return
+    await context.bot.send_message(chat_id=chat.id, text=texto, reply_markup=teclado)
+
+
+async def desactivar_habito_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    _, id_habito = query.data.split(":", 1)
+    try:
+        resultado = await _con_reintento_red(lambda: google_services.desactivar_habito(id_habito))
+    except Exception:
+        logger.exception("Fallo desactivando el habito '%s' tras reintentos.", id_habito)
+        await query.answer(text="No pude desactivarlo (fallo de red). Intenta de nuevo.", show_alert=True)
+        return
+    await query.answer(text=resultado[:200])
+    try:
+        texto, teclado = await _con_reintento_red(_render_habitos)
+    except Exception:
+        logger.exception("Habito '%s' desactivado, pero fallo refrescando la lista.", id_habito)
+        await query.edit_message_text(resultado, reply_markup=None)
+        return
+    await query.edit_message_text(texto, reply_markup=teclado)
+
+
+async def _render_medicamentos() -> tuple[str, InlineKeyboardMarkup | None]:
+    medicamentos, aviso = await google_services.medicamentos_activos_estructurados()
+    if aviso:
+        return aviso, None
+    if not medicamentos:
+        return "No hay medicamentos configurados.", None
+    lineas, botones = [], []
+    for m in medicamentos:
+        estado = "✅ tomado hoy" if m["tomado_hoy"] else "pendiente hoy"
+        notas_txt = f" ({m['notas']})" if m["notas"] else ""
+        lineas.append(f"• {m['nombre']} a las {m['hora']}{notas_txt}: {estado}")
+        botones.append([InlineKeyboardButton(f"🚫 Desactivar {m['nombre']}", callback_data=f"mbaja:{m['id']}")])
+    return "💊 Medicamentos activos:\n" + "\n".join(lineas), InlineKeyboardMarkup(botones)
+
+
+async def medicamentos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not is_chat_allowed(update):
+        logger.warning("Chat no autorizado (chat_id=%s) uso /medicamentos. Ignorado.", chat.id)
+        return
+    try:
+        texto, teclado = await _con_reintento_red(_render_medicamentos)
+    except Exception:
+        logger.exception("Fallo consultando medicamentos para /medicamentos - chat_id=%s", chat.id)
+        await context.bot.send_message(
+            chat_id=chat.id, text="No pude consultar los medicamentos ahora mismo, intenta de nuevo."
+        )
+        return
+    await context.bot.send_message(chat_id=chat.id, text=texto, reply_markup=teclado)
+
+
+async def desactivar_medicamento_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    _, id_medicamento = query.data.split(":", 1)
+    try:
+        resultado = await _con_reintento_red(lambda: google_services.desactivar_medicamento(id_medicamento))
+    except Exception:
+        logger.exception("Fallo desactivando el medicamento '%s' tras reintentos.", id_medicamento)
+        await query.answer(text="No pude desactivarlo (fallo de red). Intenta de nuevo.", show_alert=True)
+        return
+    await query.answer(text=resultado[:200])
+    try:
+        texto, teclado = await _con_reintento_red(_render_medicamentos)
+    except Exception:
+        logger.exception("Medicamento '%s' desactivado, pero fallo refrescando la lista.", id_medicamento)
+        await query.edit_message_text(resultado, reply_markup=None)
+        return
+    await query.edit_message_text(texto, reply_markup=teclado)
+
+
+_TECLADO_GASTOS_MENU = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("📅 Este mes", callback_data="gqmenu:mes_actual"),
+        InlineKeyboardButton("📅 Mes pasado", callback_data="gqmenu:mes_pasado"),
+    ],
+    [
+        InlineKeyboardButton("🏷️ Por categoría", callback_data="gqmenu:categoria"),
+        InlineKeyboardButton("👤 Por persona", callback_data="gqmenu:persona"),
+    ],
+    [InlineKeyboardButton("📊 Comparar meses", callback_data="gqmenu:comparar")],
+])
+
+# Opciones de "por categoria"/"por persona" de /gastos mientras se espera a
+# que el usuario elija un boton (mismo patron que _imagenes_pendientes: una
+# lista por chat, la ultima consulta reemplaza a la anterior).
+_gastos_opciones_consulta: dict[int, list[str]] = {}
+
+
+async def gastos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not is_chat_allowed(update):
+        logger.warning("Chat no autorizado (chat_id=%s) uso /gastos. Ignorado.", chat.id)
+        return
+    await context.bot.send_message(
+        chat_id=chat.id, text="💰 ¿Qué quieres consultar?", reply_markup=_TECLADO_GASTOS_MENU
+    )
+
+
+async def gastos_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    _, opcion = query.data.split(":", 1)
+    await query.answer()
+
+    if opcion in ("mes_actual", "mes_pasado"):
+        hoy = datetime.now(ZONA_HORARIA).date()
+        mes = hoy.replace(day=1)
+        if opcion == "mes_pasado":
+            mes = (mes - timedelta(days=1)).replace(day=1)
+        anio_mes = mes.strftime("%Y-%m")
+        try:
+            texto = await _con_reintento_red(
+                lambda: google_services.resumen_gastos(desde=anio_mes, hasta=anio_mes, agrupar_por="categoria")
+            )
+        except Exception:
+            logger.exception("Fallo consultando resumen_gastos (%s) para /gastos.", opcion)
+            await query.edit_message_text("No pude consultar los gastos ahora mismo, intenta de nuevo.")
+            return
+        etiqueta = "este mes" if opcion == "mes_actual" else "el mes pasado"
+        await query.edit_message_text(f"💰 Gastos de {etiqueta}:\n{texto}")
+        return
+
+    if opcion == "comparar":
+        try:
+            texto = await _con_reintento_red(google_services.comparar_gastos)
+        except Exception:
+            logger.exception("Fallo consultando comparar_gastos para /gastos.")
+            await query.edit_message_text("No pude comparar los gastos ahora mismo, intenta de nuevo.")
+            return
+        await query.edit_message_text(f"📊 Comparación mes a mes:\n{texto}")
+        return
+
+    if opcion == "categoria":
+        try:
+            categorias = await _con_reintento_red(google_services.categorias_conocidas)
+        except Exception:
+            logger.exception("Fallo leyendo categorias conocidas para /gastos.")
+            await query.edit_message_text("No pude leer las categorías ahora mismo, intenta de nuevo.")
+            return
+        if not categorias:
+            await query.edit_message_text("Todavía no hay categorías registradas en la hoja de gastos.")
+            return
+        _gastos_opciones_consulta[chat.id] = categorias
+        botones = [[InlineKeyboardButton(cat, callback_data=f"gqcat:{i}")] for i, cat in enumerate(categorias)]
+        await query.edit_message_text("🏷️ ¿Qué categoría?", reply_markup=InlineKeyboardMarkup(botones))
+        return
+
+    if opcion == "persona":
+        try:
+            personas = await _con_reintento_red(google_services.personas_conocidas)
+        except Exception:
+            logger.exception("Fallo leyendo personas conocidas para /gastos.")
+            await query.edit_message_text("No pude leer las personas ahora mismo, intenta de nuevo.")
+            return
+        if not personas:
+            await query.edit_message_text("Todavía no hay movimientos registrados con una persona asociada.")
+            return
+        _gastos_opciones_consulta[chat.id] = personas
+        botones = [[InlineKeyboardButton(p, callback_data=f"gqper:{i}")] for i, p in enumerate(personas)]
+        await query.edit_message_text("👤 ¿De quién?", reply_markup=InlineKeyboardMarkup(botones))
+        return
+
+
+async def gastos_categoria_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    _, indice = query.data.split(":", 1)
+    opciones = _gastos_opciones_consulta.get(chat.id) or []
+    await query.answer()
+    try:
+        categoria = opciones[int(indice)]
+    except (ValueError, IndexError):
+        await query.edit_message_text("Esa opción ya no está disponible, usa /gastos de nuevo.")
+        return
+    try:
+        texto = await _con_reintento_red(
+            lambda: google_services.resumen_gastos(categoria=categoria, agrupar_por="mes")
+        )
+    except Exception:
+        logger.exception("Fallo consultando resumen_gastos por categoria '%s'.", categoria)
+        await query.edit_message_text("No pude consultar los gastos ahora mismo, intenta de nuevo.")
+        return
+    await query.edit_message_text(f"🏷️ Gastos en '{categoria}' por mes:\n{texto}")
+
+
+async def gastos_persona_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    _, indice = query.data.split(":", 1)
+    opciones = _gastos_opciones_consulta.get(chat.id) or []
+    await query.answer()
+    try:
+        persona = opciones[int(indice)]
+    except (ValueError, IndexError):
+        await query.edit_message_text("Esa opción ya no está disponible, usa /gastos de nuevo.")
+        return
+    try:
+        texto = await _con_reintento_red(
+            lambda: google_services.resumen_gastos(persona=persona, agrupar_por="categoria")
+        )
+    except Exception:
+        logger.exception("Fallo consultando resumen_gastos por persona '%s'.", persona)
+        await query.edit_message_text("No pude consultar los gastos ahora mismo, intenta de nuevo.")
+        return
+    await query.edit_message_text(f"👤 Gastos registrados por {persona}:\n{texto}")
+
+
+# Registro de /gasto pendiente de elegir categoria y confirmar, uno por chat
+# (mismo patron que _imagenes_pendientes). Guarda tambien la lista de
+# categorias mostradas como botones, para resolver el indice del callback.
+_gastos_pendientes: dict[int, dict] = {}
+
+
+def _texto_confirmacion_gasto(pendiente: dict) -> tuple[str, InlineKeyboardMarkup]:
+    monto = pendiente["monto"]
+    categoria = pendiente["categoria"]
+    detalle = pendiente["detalle"] or categoria
+    teclado = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirmar", callback_data="gnew_conf:si"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="gnew_conf:no"),
+    ]])
+    return f"¿Confirmas? ${monto:,.0f} en '{categoria}' ({detalle})", teclado
+
+
+async def gasto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not is_chat_allowed(update):
+        logger.warning("Chat no autorizado (chat_id=%s) uso /gasto. Ignorado.", chat.id)
+        return
+    if not context.args:
+        await context.bot.send_message(
+            chat_id=chat.id, text="Uso: /gasto <monto> [detalle]\nEj: /gasto 15000 pan y leche"
+        )
+        return
+    try:
+        monto = google_services.parsear_monto(context.args[0])
+    except ValueError:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"No entendí '{context.args[0]}' como un monto. Uso: /gasto <monto> [detalle]",
+        )
+        return
+
+    detalle = " ".join(context.args[1:]).strip()
+    remitente = update.effective_user.first_name if update.effective_user else ""
+
+    try:
+        categorias = await _con_reintento_red(google_services.categorias_conocidas)
+    except Exception:
+        logger.exception("Fallo leyendo categorias conocidas para /gasto - chat_id=%s", chat.id)
+        await context.bot.send_message(
+            chat_id=chat.id, text="No pude leer las categorías ahora mismo, intenta de nuevo."
+        )
+        return
+
+    _gastos_pendientes[chat.id] = {
+        "monto": monto,
+        "detalle": detalle,
+        "remitente": remitente,
+        "categorias_opciones": categorias,
+    }
+    botones = [[InlineKeyboardButton(cat, callback_data=f"gnew_cat:{i}")] for i, cat in enumerate(categorias)]
+    botones.append([InlineKeyboardButton("➕ Otra categoría", callback_data="gnew_otra")])
+    await context.bot.send_message(
+        chat_id=chat.id, text=f"💰 ${monto:,.0f} — ¿en qué categoría?", reply_markup=InlineKeyboardMarkup(botones)
+    )
+
+
+async def gasto_categoria_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    pendiente = _gastos_pendientes.get(chat.id)
+    await query.answer()
+    if pendiente is None:
+        await query.edit_message_text("Ese registro ya no está disponible, usa /gasto de nuevo.")
+        return
+
+    _, indice = query.data.split(":", 1)
+    try:
+        categoria = pendiente["categorias_opciones"][int(indice)]
+    except (ValueError, IndexError, KeyError):
+        await query.edit_message_text("Esa opción ya no está disponible, usa /gasto de nuevo.")
+        return
+
+    pendiente["categoria"] = categoria
+    texto, teclado = _texto_confirmacion_gasto(pendiente)
+    await query.edit_message_text(texto, reply_markup=teclado)
+
+
+async def gasto_otra_categoria_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    pendiente = _gastos_pendientes.get(chat.id)
+    await query.answer()
+    if pendiente is None:
+        await query.edit_message_text("Ese registro ya no está disponible, usa /gasto de nuevo.")
+        return
+    pendiente["esperando_categoria_libre"] = True
+    await query.edit_message_text(
+        f"{query.message.text}\n\n✏️ Escribe el nombre de la categoría en un mensaje.",
+        reply_markup=None,
+    )
+
+
+async def gasto_confirmar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+    chat = update.effective_chat
+    pendiente = _gastos_pendientes.pop(chat.id, None)
+    _, decision = query.data.split(":", 1)
+    await query.answer()
+
+    if pendiente is None or "categoria" not in pendiente:
+        await query.edit_message_text("Ese registro ya no está disponible, usa /gasto de nuevo.")
+        return
+
+    if decision == "no":
+        await query.edit_message_text("Cancelado, no se registró nada.", reply_markup=None)
+        return
+
+    hoy_iso = datetime.now(ZONA_HORARIA).date().isoformat()
+    detalle = pendiente["detalle"] or pendiente["categoria"]
+    try:
+        resultado = await _con_reintento_red(
+            lambda: google_services.registrar_movimiento(
+                fecha_iso=hoy_iso,
+                descripcion=detalle,
+                categoria=pendiente["categoria"],
+                monto=pendiente["monto"],
+                tipo="gasto",
+                registrado_por=pendiente["remitente"],
+            )
+        )
+    except Exception:
+        logger.exception("Fallo registrando gasto rapido tras reintentos - chat_id=%s", chat.id)
+        await query.edit_message_text(
+            "No pude guardar el gasto (fallo de red). Intenta /gasto de nuevo.", reply_markup=None
+        )
+        return
+
+    await query.edit_message_text(f"✅ {resultado}", reply_markup=None)
 
 
 _ULTIMA_REVISION_ACTIVIDAD: datetime | None = None
@@ -308,6 +753,10 @@ async def _revisar_pendientes_por_actividad(context: ContextTypes.DEFAULT_TYPE) 
     mensajes seguidos, solo el primero de la ventana dispara la revision real --
     evita que una conversacion activa genere mas llamadas a la API que el propio
     poll que se busca aliviar.
+
+    Los handlers la lanzan DESPUES de responder, no antes: el mensaje va
+    primero y la revision despues. Cada job toma el turno por su cuenta (via
+    @_en_turno_google), asi que aca no se toma: el lock no es reentrante.
     """
     global _ULTIMA_REVISION_ACTIVIDAD
     ahora = datetime.now(ZONA_HORARIA)
@@ -376,8 +825,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat = update.effective_chat
     remitente = query.from_user.first_name if query.from_user else ""
     _, texto = opcion
-    context.application.create_task(_revisar_pendientes_por_actividad(context))
     await _responder_con_cerebro(context, chat.id, texto, remitente)
+    context.application.create_task(_revisar_pendientes_por_actividad(context))
 
 
 TIMEOUT_JOB_CALENDARIO = 45
@@ -411,6 +860,7 @@ def _guardar_estado_jobs(estado: dict) -> None:
     ESTADO_JOBS_PATH.write_text(json.dumps(estado), encoding="utf-8")
 
 
+@_en_turno_google
 async def alerta_calendario_diaria(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_alerta_calendario_diaria_impl(context), timeout=TIMEOUT_JOB_CALENDARIO)
@@ -447,6 +897,7 @@ async def _alerta_calendario_diaria_impl(context: ContextTypes.DEFAULT_TYPE) -> 
     _guardar_estado_jobs(estado)
 
 
+@_en_turno_google
 async def recordatorio_pagos_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_recordatorio_pagos_diario_impl(context), timeout=TIMEOUT_JOB_PAGOS)
@@ -495,6 +946,7 @@ async def _recordatorio_pagos_diario_impl(context: ContextTypes.DEFAULT_TYPE) ->
             logger.exception("Fallo enviando el recordatorio de pago '%s'.", p.get("id"))
 
 
+@_en_turno_google
 async def recordatorio_medicamentos(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_recordatorio_medicamentos_impl(context), timeout=TIMEOUT_JOB_MEDICAMENTOS)
@@ -527,6 +979,7 @@ async def _recordatorio_medicamentos_impl(context: ContextTypes.DEFAULT_TYPE) ->
             logger.exception("Fallo enviando el recordatorio de medicamento '%s'.", m.get("id"))
 
 
+@_en_turno_google
 async def recordatorio_habitos(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_recordatorio_habitos_impl(context), timeout=TIMEOUT_JOB_HABITOS)
@@ -559,6 +1012,7 @@ async def _recordatorio_habitos_impl(context: ContextTypes.DEFAULT_TYPE) -> None
             logger.exception("Fallo enviando el recordatorio de habito '%s'.", h.get("id"))
 
 
+@_en_turno_google
 async def recordatorio_eventos_manana(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_recordatorio_eventos_manana_impl(context), timeout=TIMEOUT_JOB_EVENTOS_MANANA)
@@ -612,6 +1066,7 @@ async def _recordatorio_eventos_manana_impl(context: ContextTypes.DEFAULT_TYPE) 
             logger.exception("Fallo marcando avisoManana en el evento '%s'.", ev["id"])
 
 
+@_en_turno_google
 async def recordatorio_eventos_2h(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_recordatorio_eventos_2h_impl(context), timeout=TIMEOUT_JOB_EVENTOS_2H)
@@ -660,6 +1115,7 @@ async def _ejecutar_iniciativa(ini: dict) -> str:
     return f"📌 {ini['descripcion']}{cuerpo}"
 
 
+@_en_turno_google
 async def revisar_iniciativas_proactivas(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(_revisar_iniciativas_proactivas_impl(context), timeout=TIMEOUT_JOB_INICIATIVAS)
@@ -678,6 +1134,7 @@ async def _revisar_iniciativas_proactivas_impl(context: ContextTypes.DEFAULT_TYP
             logger.exception("Fallo ejecutando la iniciativa '%s'.", ini.get("id"))
 
 
+@_en_turno_google
 async def limpiar_iniciativas_antiguas_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.wait_for(
@@ -759,7 +1216,9 @@ async def _con_reintento_red(coro_fn, intentos: int = 2, espera_seg: float = 2.0
     ultimo_error = None
     for intento in range(intentos):
         try:
-            return await coro_fn()
+            # El turno se suelta durante la espera entre reintentos.
+            async with _TURNO_GOOGLE:
+                return await coro_fn()
         except (OSError, TimeoutError) as exc:
             ultimo_error = exc
             logger.warning("Reintento %d/%d tras error de red: %s", intento + 1, intentos, exc)
@@ -895,6 +1354,11 @@ async def _post_init(application) -> None:
         [
             BotCommand("start", "Verificar que Espartaco este activo"),
             BotCommand("menu", "Ver las funciones disponibles"),
+            BotCommand("agenda", "Ver los proximos eventos del calendario"),
+            BotCommand("habitos", "Ver/desactivar habitos de salud y bienestar"),
+            BotCommand("medicamentos", "Ver/desactivar medicamentos activos"),
+            BotCommand("gastos", "Consultar gastos por mes, categoria o persona"),
+            BotCommand("gasto", "Registrar un gasto rapido: /gasto <monto> [detalle]"),
             BotCommand("reset", "Borrar el historial de esta conversacion"),
         ]
     )
@@ -903,11 +1367,8 @@ async def _post_init(application) -> None:
 def main() -> None:
     logger.info("Iniciando Espartaco...")
     brain.configure(
-        OMNIROUTE_API_KEY,
-        OMNIROUTE_MODEL,
-        base_url=OMNIROUTE_BASE_URL,
-        transcription_model=OMNIROUTE_TRANSCRIPTION_MODEL,
-        vision_model=OMNIROUTE_VISION_MODEL,
+        deepseek_api_key=DEEPSEEK_API_KEY,
+        deepseek_model=DEEPSEEK_MODEL,
     )
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(_post_init).build()
@@ -915,6 +1376,11 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("agenda", agenda_command))
+    application.add_handler(CommandHandler("habitos", habitos_command))
+    application.add_handler(CommandHandler("medicamentos", medicamentos_command))
+    application.add_handler(CommandHandler("gastos", gastos_command))
+    application.add_handler(CommandHandler("gasto", gasto_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
@@ -923,6 +1389,14 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(confirmar_habito_callback, pattern=r"^habito:"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(imagen_callback, pattern=r"^imagen:"))
+    application.add_handler(CallbackQueryHandler(desactivar_habito_callback, pattern=r"^hbaja:"))
+    application.add_handler(CallbackQueryHandler(desactivar_medicamento_callback, pattern=r"^mbaja:"))
+    application.add_handler(CallbackQueryHandler(gastos_menu_callback, pattern=r"^gqmenu:"))
+    application.add_handler(CallbackQueryHandler(gastos_categoria_callback, pattern=r"^gqcat:"))
+    application.add_handler(CallbackQueryHandler(gastos_persona_callback, pattern=r"^gqper:"))
+    application.add_handler(CallbackQueryHandler(gasto_categoria_callback, pattern=r"^gnew_cat:"))
+    application.add_handler(CallbackQueryHandler(gasto_otra_categoria_callback, pattern=r"^gnew_otra"))
+    application.add_handler(CallbackQueryHandler(gasto_confirmar_callback, pattern=r"^gnew_conf:"))
     application.add_error_handler(error_handler)
 
     # Jobs de UNA hora fija al dia: se disparan justo a esa hora (sin poll de
