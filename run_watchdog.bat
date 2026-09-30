@@ -6,27 +6,27 @@ set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
 set "MAIN_SCRIPT=%PROJECT_DIR%\main.py"
 set "LOG_DIR=%PROJECT_DIR%\logs"
 set "WATCHDOG_LOG=%LOG_DIR%\watchdog.log"
-set "OMNIROUTE_CMD=C:\Users\rober\AppData\Roaming\npm\omniroute.cmd"
 set "LATIDO=%PROJECT_DIR%\latido.json"
 
 rem Minutos sin latido tras los cuales se da por congelado el proceso. El job
-rem heartbeat de main.py escribe cada 5 min, asi que 12 tolera dos latidos
-rem perdidos antes de actuar.
-set "LATIDO_MAX_MIN=12"
+rem heartbeat de main.py escribe cada 5 min. Bajado de 12 a 6 el 2026-09-27
+rem (congelamientos frecuentes por Modern Standby/Wi-Fi del equipo): tolera
+rem un latido perdido y fuerza el reinicio antes en vez de esperar hasta 12 min.
+set "LATIDO_MAX_MIN=6"
+
+rem Margen tras despertar la PC. Mientras el equipo duerme (Modern Standby),
+rem main.py esta congelado y no escribe latido, asi que al despertar el latido
+rem SIEMPRE parece vencido aunque el proceso este sano. El 2026-09-30 eso hizo
+rem que el watchdog matara a Espartaco dos veces justo mientras procesaba un
+rem mensaje recien llegado, y esas solicitudes se perdieron. Si la PC desperto
+rem hace menos de estos minutos, no se mata: se revisa en la proxima pasada.
+rem Se puede sobreescribir desde el entorno (lo usa la prueba end-to-end).
+if not defined GRACIA_DESPERTAR_MIN set "GRACIA_DESPERTAR_MIN=6"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
-echo [%date% %time%] Verificando si OmniRoute esta en ejecucion... >> "%WATCHDOG_LOG%"
-
-powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*omniroute*' }; if ($p) { exit 0 } else { exit 1 }"
-
-if %ERRORLEVEL% EQU 0 (
-    echo [%date% %time%] OmniRoute sigue activo. No se requiere accion. >> "%WATCHDOG_LOG%"
-) else (
-    echo [%date% %time%] OmniRoute NO esta activo. Reiniciando... >> "%WATCHDOG_LOG%"
-    call "%OMNIROUTE_CMD%" serve --daemon --no-open >> "%LOG_DIR%\omniroute_stdout.log" 2>> "%LOG_DIR%\omniroute_stderr.log"
-    echo [%date% %time%] Comando de reinicio de OmniRoute enviado. >> "%WATCHDOG_LOG%"
-)
+rem OmniRoute ya no forma parte de Espartaco (2026-09-27, ver .env): este
+rem watchdog dejo de vigilarlo/reiniciarlo a proposito, no es un descuido.
 
 echo [%date% %time%] Verificando si main.py esta vivo Y escuchando... >> "%WATCHDOG_LOG%"
 
@@ -34,12 +34,20 @@ rem Que el proceso exista NO basta: el polling de Telegram puede haberse caido
 rem dejando el proceso corriendo y el bot sordo. Por eso se mira ademas el
 rem latido que main.py solo escribe mientras el updater sigue activo.
 rem   exit 0 = sano   1 = no corre   2 = sin latido   3 = latido vencido
-powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*main.py*' } | Sort-Object CreationDate | Select-Object -First 1; if (-not $p) { exit 1 }; if (((Get-Date) - $p.CreationDate).TotalMinutes -lt %LATIDO_MAX_MIN%) { exit 0 }; if (-not (Test-Path '%LATIDO%')) { exit 2 }; if (((Get-Date) - (Get-Item '%LATIDO%').LastWriteTime).TotalMinutes -gt %LATIDO_MAX_MIN%) { exit 3 }; exit 0"
+rem   exit 4 = latido vencido pero la PC acaba de despertar (se da margen)
+rem El ultimo despertar sale del registro System: Kernel-Power 507 (salida de
+rem Modern Standby) o Power-Troubleshooter 1 (reanudacion de suspension clasica).
+powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*main.py*' } | Sort-Object CreationDate | Select-Object -First 1; if (-not $p) { exit 1 }; if (((Get-Date) - $p.CreationDate).TotalMinutes -lt %LATIDO_MAX_MIN%) { exit 0 }; if (-not (Test-Path '%LATIDO%')) { exit 2 }; if (((Get-Date) - (Get-Item '%LATIDO%').LastWriteTime).TotalMinutes -le %LATIDO_MAX_MIN%) { exit 0 }; $w = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'; Id=507},@{LogName='System'; ProviderName='Microsoft-Windows-Power-Troubleshooter'; Id=1} -MaxEvents 1 -ErrorAction SilentlyContinue; if ($w -and ((Get-Date) - $w.TimeCreated).TotalMinutes -lt %GRACIA_DESPERTAR_MIN%) { exit 4 }; exit 3"
 
 set "SALUD=%ERRORLEVEL%"
 
 if "%SALUD%"=="0" (
     echo [%date% %time%] main.py activo y escuchando. No se requiere accion. >> "%WATCHDOG_LOG%"
+    goto :fin
+)
+
+if "%SALUD%"=="4" (
+    echo [%date% %time%] Latido vencido pero la PC desperto hace menos de %GRACIA_DESPERTAR_MIN% min - se da margen, sin matar. >> "%WATCHDOG_LOG%"
     goto :fin
 )
 
