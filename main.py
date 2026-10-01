@@ -2,6 +2,7 @@
 main.py - Nucleo asincrono de Espartaco (Fase 4: Telegram + cerebro via DeepSeek + Google tools)
 """
 import asyncio
+import contextlib
 import functools
 import json
 import logging
@@ -57,6 +58,28 @@ _ARRANQUE = datetime.now(ZONA_HORARIA)
 # tarde. No es reentrante: nada que ya tenga el turno debe volver a pedirlo.
 _TURNO_GOOGLE = asyncio.Lock()
 
+# Red de seguridad: si algo retiene el turno mas de esto, el bot esta sordo
+# aunque el proceso y el polling sigan vivos (el 2026-10-01 una llamada a
+# DeepSeek quedo colgada >10 min con el turno tomado y el latido seguia sano,
+# asi que el watchdog no hacia nada). El heartbeat lo detecta y mata el
+# proceso para que el watchdog lo relance. Debe ser mayor que el plazo total
+# de una respuesta (brain.TIMEOUT_TOTAL_RESPUESTA_SEG) y que el timeout de
+# cualquier job, para no matar trabajo legitimo.
+LIMITE_TURNO_RETENIDO_SEG = 600
+_turno_tomado_desde: datetime | None = None
+
+
+@contextlib.asynccontextmanager
+async def _turno():
+    """Toma _TURNO_GOOGLE y deja constancia de desde cuando, para el heartbeat."""
+    global _turno_tomado_desde
+    async with _TURNO_GOOGLE:
+        _turno_tomado_desde = datetime.now(ZONA_HORARIA)
+        try:
+            yield
+        finally:
+            _turno_tomado_desde = None
+
 # Colchon para la rafaga de mensajes atrasados tras un arranque: durante los
 # primeros VENTANA_ATRASADOS_SEG, pausa breve entre mensaje y mensaje para no
 # quemar de golpe la cuota por minuto de Google (Calendar corta con 403) ni
@@ -72,7 +95,7 @@ def _en_turno_google(job):
     consume su timeout."""
     @functools.wraps(job)
     async def envoltura(*args, **kwargs):
-        async with _TURNO_GOOGLE:
+        async with _turno():
             return await job(*args, **kwargs)
     return envoltura
 
@@ -175,7 +198,7 @@ async def _responder_con_cerebro(
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     try:
-        async with _TURNO_GOOGLE:
+        async with _turno():
             respuesta = await brain.ask(chat_id, texto, remitente=remitente)
     except Exception:
         logger.exception("Fallo al pedirle respuesta al cerebro - chat_id=%s", chat_id)
@@ -1196,6 +1219,14 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
         _morir_para_que_el_watchdog_reinicie("el polling de Telegram esta caido")
         return
 
+    if _turno_tomado_desde is not None:
+        retenido = (datetime.now(ZONA_HORARIA) - _turno_tomado_desde).total_seconds()
+        if retenido > LIMITE_TURNO_RETENIDO_SEG:
+            _morir_para_que_el_watchdog_reinicie(
+                f"el turno de Google/DeepSeek lleva {retenido:.0f}s retenido (algo quedo colgado)"
+            )
+            return
+
     try:
         LATIDO_PATH.write_text(
             json.dumps({"ts": datetime.now(ZONA_HORARIA).isoformat(), "pid": os.getpid()}),
@@ -1217,7 +1248,7 @@ async def _con_reintento_red(coro_fn, intentos: int = 2, espera_seg: float = 2.0
     for intento in range(intentos):
         try:
             # El turno se suelta durante la espera entre reintentos.
-            async with _TURNO_GOOGLE:
+            async with _turno():
                 return await coro_fn()
         except (OSError, TimeoutError) as exc:
             ultimo_error = exc

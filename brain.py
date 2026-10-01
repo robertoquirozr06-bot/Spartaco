@@ -1,15 +1,26 @@
 """
 brain.py - Cerebro conversacional de Espartaco (Fase 4).
 
-Habla con el modelo a traves de OmniRoute (gateway local OpenAI-compatible
-en http://localhost:20128/v1, ver https://github.com/diegosouzapw/OmniRoute)
-en vez de ir directo a la API de Gemini: la API key gratuita de Gemini tiene
-un limite de 20 requests/dia, insuficiente para un bot de grupo en uso real.
+El cerebro (esta funcion `ask()`) y la lectura de imagenes (`analizar_imagen`)
+hablan directo con la API de DeepSeek (endpoint OpenAI-compatible,
+`DEEPSEEK_BASE_URL` abajo) desde el 2026-09-29. Del 2026-09-26 al 28 iba
+contra Gemini directo, y antes via OmniRoute (gateway local). Igual que con
+Gemini, NO hay respaldo automatico a otro proveedor: si la key de DeepSeek se
+queda sin saldo o DeepSeek tiene una caida, el cerebro deja de responder
+hasta que se resuelva a mano (ver DEEPSEEK_API_KEY en .env).
 
-El SDK openai no hace function calling automatico como google-genai, asi que
-aca se implementa el loop manual: mandar tools -> si el modelo pide una
-tool_call, ejecutar la funcion de Python real y devolver el resultado como
-mensaje "tool" -> repetir hasta que el modelo conteste con texto normal.
+Notas de voz: DeepSeek NO acepta audio (probado 2026-09-29: el content part
+`input_audio` da 400 "unknown variant" y `/audio/transcriptions` da 404), asi
+que al dar de baja Gemini se apago la transcripcion -- decision de Roberto.
+main.py responde a una nota de voz pidiendo que la escriban.
+
+El SDK openai no hace function calling automatico, asi que aca se implementa
+el loop manual: mandar tools -> si el modelo pide una tool_call, ejecutar la
+funcion de Python real y devolver el resultado como mensaje "tool" -> repetir
+hasta que el modelo conteste con texto normal. DeepSeek es un modelo
+"thinking": dentro de un mismo turno con tool_calls exige que se le devuelva
+su `reasoning_content` (sin eso responde 400 "must be passed back"); en turnos
+ya cerrados del historial no hace falta, asi que no se persiste.
 
 Mantiene el historial de mensajes por chat_id de Telegram, persistido en disco
 (`historial_chats.json`) para sobrevivir a un reinicio del proceso.
@@ -19,6 +30,8 @@ import base64
 import inspect
 import json
 import logging
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -35,14 +48,38 @@ logger = logging.getLogger("espartaco")
 BASE_DIR = Path(__file__).resolve().parent
 HISTORIAL_PATH = BASE_DIR / "historial_chats.json"
 
-BASE_URL = "http://localhost:20128/v1"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 MAX_TOOL_HOPS = 8
 
-# OmniRoute corre en localhost (connect corto), pero puede reenviar a un
-# backend remoto con tool-calling encadenado que legitimamente tarda; 90s de
+# El proveedor corre en internet y puede encadenar tool-calling que
+# legitimamente tarda (mas con un modelo "thinking"); 90s de
 # lectura evita heredar los 600s por defecto del SDK, que hoy pueden
 # enmascarar un cuelgue de red durante minutos.
 TIMEOUT_CEREBRO = httpx.Timeout(connect=5.0, read=90.0, write=30.0, pool=5.0)
+
+# El read timeout de httpx es por lectura, no por llamada: si la conexion queda
+# en un limbo (el 2026-10-01 la PC se durmio a mitad de una respuesta) o el
+# proveedor manda keep-alives, la llamada puede no terminar nunca. El
+# 2026-10-01 una quedo colgada >10 min en Response.aread con el turno tomado,
+# y el bot quedo sordo mientras el latido seguia sano. Estos son plazos de
+# reloj: por llamada (se reintenta) y por respuesta completa (se rinde).
+TIMEOUT_LLAMADA_CEREBRO_SEG = 120
+TIMEOUT_TOTAL_RESPUESTA_SEG = 300
+# Modelo de respaldo: el 2026-10-01 deepseek-flash quedo saturado (solo
+# mandaba keep-alives, ni un "hola" en 60s) mientras deepseek-v4-pro respondia
+# en 7s. Si el modelo principal no termina a tiempo, el siguiente intento usa
+# el respaldo, y se queda en el durante MINUTOS_EN_RESPALDO para no perder
+# TIMEOUT_LLAMADA_CEREBRO_SEG en cada mensaje mientras el principal siga caido.
+# El respaldo es mas caro por mensaje: solo se usa mientras dure la falla.
+# Vacio en .env (DEEPSEEK_FALLBACK_MODEL=) desactiva el respaldo.
+MODELO_RESPALDO = os.getenv("DEEPSEEK_FALLBACK_MODEL", "deepseek-v4-pro").strip()
+MINUTOS_EN_RESPALDO = 15
+_respaldo_hasta = 0.0  # time.monotonic()
+
+MENSAJE_TIMEOUT_RESPUESTA = (
+    "Se me trabó la conexión y no alcancé a terminar. "
+    "Revisa si quedó hecho lo que pediste y, si no, repítemelo por favor."
+)
 MAX_MENSAJES_HISTORIAL = 40
 MAX_INTENTOS_POR_HOP = 3
 
@@ -63,14 +100,16 @@ MAX_CHARS_RESULTADO_TOOL = 3000
 # 3s"), asi que conviene esperar y reintentar en vez de rendirse de una.
 ESPERA_REINTENTO_413 = 4.0
 
-# Notas de voz: mismo endpoint de OmniRoute, pero /audio/transcriptions en vez
-# de /chat/completions -- reenvia a Groq (whisper-large-v3), que ya esta
-# conectado ahi para el cerebro, sin necesidad de una cuenta/API key nueva.
-TIMEOUT_TRANSCRIPCION = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
+# Un error con recovery_hint.action == "retry" es transitorio (herencia de la
+# epoca de OmniRoute, cuando "auto/*" podia caer en un proveedor del pool que
+# fallaba una vez y funcionaba en el siguiente intento). Con un proveedor
+# directo sigue valiendo la pena un reintento antes de rendirse con "se me
+# trabo el cerebro".
+ESPERA_REINTENTO_TRANSITORIO = 2.0
 
 # Imagenes: llamada directa a /chat/completions (mismo patron que la
-# transcripcion) pero con un modelo declarado con vision. No pasa por el loop
-# de tools: es una sub-tarea de lectura, no una conversacion con herramientas.
+# transcripcion) con image_url (data URL base64). No pasa por el loop de
+# tools: es una sub-tarea de lectura, no una conversacion con herramientas.
 TIMEOUT_VISION = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
 
 PROMPT_ANALIZAR_IMAGEN = (
@@ -372,10 +411,10 @@ _TOOLS_SCHEMA = [
                     "categoria": {"type": "string", "description": "Categoria a filtrar, ej. 'mercado'. Tolera mayusculas, tildes y sinonimos. Vacio = todas."},
                     "persona": {"type": "string", "description": "Filtra por quien REGISTRO el movimiento en el chat, ej. 'Leidy'. Vacio = todas."},
                     "agrupar_por": {"type": "string", "enum": ["categoria", "mes", "persona", "concepto"], "description": "Como desglosar el total. Usa 'mes' cuando pregunten por el gasto mensual."},
-                    # Sin cadena vacia en el enum: Gemini rechaza con 400 un enum
-                    # que traiga "" y, como el schema de tools viaja en CADA
-                    # request, eso no tumbaba solo las finanzas -- tumbaba
-                    # cualquier conversacion que cayera en un modelo Gemini.
+                    # Sin cadena vacia en el enum: Gemini rechazaba con 400 un
+                    # enum que trajera "" y, como el schema de tools viaja en
+                    # CADA request, eso tumbaba cualquier conversacion. Se deja
+                    # asi por si se vuelve a un modelo Gemini.
                     "tipo": {"type": "string", "enum": ["gasto", "ingreso", "ambos"], "description": "'gasto' por defecto; 'ambos' suma ingresos y gastos."},
                 },
                 "required": [],
@@ -772,60 +811,33 @@ def _guardar_historiales_disco() -> None:
     tmp_path.replace(HISTORIAL_PATH)
 
 
-_client: AsyncOpenAI | None = None
+_client_cerebro: AsyncOpenAI | None = None
 _model_name: str | None = None
-_transcription_model: str | None = None
-_vision_model: str | None = None
 _historiales: dict[int, list[dict]] = _cargar_historiales_disco()
 
-
 def configure(
-    api_key: str,
-    model_name: str,
-    base_url: str = BASE_URL,
-    transcription_model: str = "whisper-large-v3",
-    vision_model: str = "",
+    *,
+    deepseek_api_key: str,
+    deepseek_model: str,
+    deepseek_base_url: str = DEEPSEEK_BASE_URL,
 ) -> None:
-    """Inicializa el cliente contra OmniRoute. Debe llamarse una vez al arrancar."""
-    global _client, _model_name, _transcription_model, _vision_model
-    _client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=TIMEOUT_CEREBRO, max_retries=2)
-    _model_name = model_name
-    _transcription_model = transcription_model
-    _vision_model = vision_model or model_name
-    logger.info("Cerebro configurado via OmniRoute (%s) con modelo '%s'.", base_url, model_name)
+    """Inicializa el cliente de DeepSeek. Debe llamarse una vez al arrancar.
 
-
-async def transcribir_audio(audio_bytes: bytes, nombre_archivo: str = "nota_voz.ogg") -> str:
-    """Transcribe una nota de voz a texto (via OmniRoute -> Groq whisper-large-v3).
-
-    Args:
-      audio_bytes: Contenido crudo del archivo de audio (ej. descargado de Telegram).
-      nombre_archivo: Nombre/extension a declarar en el upload (Groq lo usa para
-        inferir el formato); no necesita coincidir con un archivo real en disco.
-
-    Returns:
-      El texto transcrito (puede venir vacio si el audio no tenia voz audible).
-
-    Raises:
-      Exception: si OmniRoute/Groq no responde o el audio es invalido -- el
-      llamador decide como avisarle al usuario (mismo patron que brain.ask).
+    Un solo cliente/modelo para cerebro (`ask()`) y vision
+    (`analizar_imagen()`): `deepseek-flash` acepta texto e imagen.
     """
-    if _client is None:
-        raise RuntimeError("brain.configure() debe llamarse antes de usar transcribir_audio().")
-
-    transcripcion = await _client.audio.transcriptions.create(
-        model=_transcription_model,
-        file=(nombre_archivo, audio_bytes),
-        language="es",
-        timeout=TIMEOUT_TRANSCRIPCION,
+    global _client_cerebro, _model_name
+    _client_cerebro = AsyncOpenAI(
+        base_url=deepseek_base_url, api_key=deepseek_api_key, timeout=TIMEOUT_CEREBRO, max_retries=2
     )
-    return transcripcion.text.strip()
+    _model_name = deepseek_model
+    logger.info("Cerebro/vision configurados directo contra DeepSeek (%s) con modelo '%s'.", deepseek_base_url, deepseek_model)
 
 
 async def analizar_imagen(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
-    """Describe una imagen (fecha/hora/lugar/motivo si los tiene) via un modelo
-    con vision en OmniRoute, para que el llamador decida (con el usuario) si
-    hay que agendar una cita, crear un recordatorio, o no hacer nada.
+    """Describe una imagen (fecha/hora/lugar/motivo si los tiene) via DeepSeek,
+    para que el llamador decida (con el usuario) si hay que agendar una cita,
+    crear un recordatorio, o no hacer nada.
 
     Args:
       image_bytes: Contenido crudo de la imagen (ej. descargada de Telegram).
@@ -835,15 +847,15 @@ async def analizar_imagen(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
       Descripcion en texto de lo que se ve en la imagen.
 
     Raises:
-      Exception: si OmniRoute/el modelo de vision no responde -- el llamador
-      decide como avisarle al usuario (mismo patron que brain.ask).
+      Exception: si DeepSeek no responde -- el llamador decide como avisarle al
+      usuario (mismo patron que brain.ask).
     """
-    if _client is None:
+    if _client_cerebro is None:
         raise RuntimeError("brain.configure() debe llamarse antes de usar analizar_imagen().")
 
     data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-    respuesta = await _client.chat.completions.create(
-        model=_vision_model,
+    respuesta = await _client_cerebro.chat.completions.create(
+        model=_model_name,
         messages=[{
             "role": "user",
             "content": [
@@ -851,10 +863,10 @@ async def analizar_imagen(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
                 {"type": "image_url", "image_url": {"url": data_url}},
             ],
         }],
-        # El modelo de vision por defecto (gemini-3.1-flash-lite) es un modelo
-        # "thinking" que gasta buena parte del presupuesto en reasoning_content
-        # antes de la respuesta final -- con un max_tokens chico, el corte por
-        # "length" puede truncar el content real a texto vacio o a medias.
+        # DeepSeek es un modelo "thinking" que gasta buena parte del presupuesto
+        # en reasoning_content antes de la respuesta final -- con un
+        # max_tokens chico, el corte por "length" puede truncar el content
+        # real a texto vacio o a medias.
         max_tokens=800,
         timeout=TIMEOUT_VISION,
     )
@@ -976,12 +988,55 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
     `remitente` (nombre de quien escribio en Telegram) se agrega al contexto
     para que el modelo pueda usarlo, por ejemplo, al registrar un movimiento
     financiero.
+
+    Nunca tarda mas de TIMEOUT_TOTAL_RESPUESTA_SEG: si se vence, se descarta lo
+    que haya quedado a medias de este turno (un assistant con tool_calls sin
+    su resultado haria que DeepSeek rechace el siguiente pedido con 400) y se
+    devuelve MENSAJE_TIMEOUT_RESPUESTA.
     """
-    if _client is None:
+    if _client_cerebro is None:
         raise RuntimeError("brain.configure() debe llamarse antes de usar ask().")
 
     historial = _get_historial(chat_id)
-    historial.append({"role": "user", "content": f"{_contexto_temporal(remitente)}\n{text}"})
+    entrada_usuario = {"role": "user", "content": f"{_contexto_temporal(remitente)}\n{text}"}
+    historial.append(entrada_usuario)
+    try:
+        return await asyncio.wait_for(
+            _ask_sin_plazo(chat_id, historial), timeout=TIMEOUT_TOTAL_RESPUESTA_SEG
+        )
+    except TimeoutError:
+        logger.error(
+            "La respuesta no termino en %ss, se abandona el turno - chat_id=%s",
+            TIMEOUT_TOTAL_RESPUESTA_SEG, chat_id,
+        )
+        # Por identidad: el recorte del historial puede haber movido los indices.
+        posicion = next((i for i, m in enumerate(historial) if m is entrada_usuario), None)
+        if posicion is not None:
+            del historial[posicion + 1:]
+        historial.append({"role": "assistant", "content": MENSAJE_TIMEOUT_RESPUESTA})
+        _guardar_historiales_disco()
+        return MENSAJE_TIMEOUT_RESPUESTA
+
+
+def _modelo_para_llamada() -> str:
+    if MODELO_RESPALDO and time.monotonic() < _respaldo_hasta:
+        return MODELO_RESPALDO
+    return _model_name
+
+
+def _pasar_a_respaldo(modelo_fallido: str, chat_id: int) -> None:
+    global _respaldo_hasta
+    if not MODELO_RESPALDO or modelo_fallido == MODELO_RESPALDO:
+        return
+    _respaldo_hasta = time.monotonic() + MINUTOS_EN_RESPALDO * 60
+    logger.warning(
+        "Modelo '%s' sin respuesta: se usa '%s' por %d min - chat_id=%s",
+        modelo_fallido, MODELO_RESPALDO, MINUTOS_EN_RESPALDO, chat_id,
+    )
+
+
+async def _ask_sin_plazo(chat_id: int, historial: list[dict]) -> str:
+    """Cuerpo de ask(): el ciclo modelo -> tools -> modelo, sin plazo total."""
 
     # Recortar ANTES de llamar, no solo al final: si el historial venia pesado
     # del turno anterior, este request ya saldria pasado de tokens y el
@@ -994,11 +1049,21 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
     for _ in range(MAX_TOOL_HOPS):
         completion = None
         for intento in range(MAX_INTENTOS_POR_HOP):
+            modelo = _modelo_para_llamada()
             try:
-                completion = await _client.chat.completions.create(
-                    model=_model_name, messages=mensajes, tools=_TOOLS_SCHEMA
+                completion = await asyncio.wait_for(
+                    _client_cerebro.chat.completions.create(
+                        model=modelo, messages=mensajes, tools=_TOOLS_SCHEMA
+                    ),
+                    timeout=TIMEOUT_LLAMADA_CEREBRO_SEG,
                 )
                 break
+            except (TimeoutError, openai.APITimeoutError):
+                logger.warning(
+                    "Intento %d/%d: DeepSeek ('%s') no termino a tiempo, se reintenta - chat_id=%s",
+                    intento + 1, MAX_INTENTOS_POR_HOP, modelo, chat_id,
+                )
+                _pasar_a_respaldo(modelo, chat_id)
             except openai.BadRequestError as exc:
                 # El modelo a veces genera un tool_call con el nombre corrupto o
                 # argumentos que no calzan con el schema (glitch de generacion).
@@ -1008,9 +1073,17 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
                     intento + 1, MAX_INTENTOS_POR_HOP, chat_id, exc,
                 )
             except openai.APIStatusError as exc:
+                sugerencia = exc.body.get("recovery_hint") if isinstance(exc.body, dict) else None
+                if isinstance(sugerencia, dict) and sugerencia.get("action") == "retry":
+                    logger.warning(
+                        "Intento %d/%d fallo (codigo %d, error transitorio) - chat_id=%s: %s",
+                        intento + 1, MAX_INTENTOS_POR_HOP, exc.status_code, chat_id, exc,
+                    )
+                    await asyncio.sleep(ESPERA_REINTENTO_TRANSITORIO)
+                    continue
                 if exc.status_code != 413:
                     logger.exception(
-                        "Fallo la llamada al modelo via OmniRoute - chat_id=%s", chat_id
+                        "Fallo la llamada al modelo (DeepSeek) - chat_id=%s", chat_id
                     )
                     break
                 # 413 = el request excede el limite de tokens-por-minuto del
@@ -1026,7 +1099,7 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
                     mensajes = [{"role": "system", "content": SYSTEM_PROMPT}] + historial
                 await asyncio.sleep(ESPERA_REINTENTO_413)
             except Exception:
-                logger.exception("Fallo la llamada al modelo via OmniRoute - chat_id=%s", chat_id)
+                logger.exception("Fallo la llamada al modelo (DeepSeek) - chat_id=%s", chat_id)
                 break
 
         if completion is None:
@@ -1042,8 +1115,16 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
                 "content": mensaje.content,
                 "tool_calls": [tc.model_dump() for tc in mensaje.tool_calls],
             }
-            mensajes.append(entrada_asistente)
             historial.append(entrada_asistente)
+            # DeepSeek exige su reasoning_content de vuelta mientras el turno
+            # siga abierto (400 si falta), pero no en turnos ya cerrados: va
+            # solo en `mensajes`, no al historial persistido, para no inflarlo.
+            razonamiento = getattr(mensaje, "reasoning_content", None)
+            if razonamiento is None and mensaje.model_extra:
+                razonamiento = mensaje.model_extra.get("reasoning_content")
+            if razonamiento:
+                entrada_asistente = {**entrada_asistente, "reasoning_content": razonamiento}
+            mensajes.append(entrada_asistente)
             for tc in mensaje.tool_calls:
                 resultado = await _ejecutar_tool(tc.function.name, tc.function.arguments, chat_id)
                 entrada_tool = {"role": "tool", "tool_call_id": tc.id, "content": resultado}
