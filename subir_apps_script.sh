@@ -3,8 +3,9 @@
 # ciegas lo que haya en Google: primero baja lo remoto y muestra el diff.
 #
 # Requiere (una sola vez):
-#   clasp login --user spartacus     <- cuenta DUENA de la hoja CONTROL DE SPARTACUS
-#                                       (--user evita borrar la sesion de latamdigitalmarketing)
+#   clasp login --user spartacus     <- cuenta DUENA de la hoja de Espartaco
+#                                       (--user evita borrar la sesion de otra cuenta de Google)
+#   APPS_SCRIPT_ID=... en .env       <- ver abajo
 #   ./subir_apps_script.sh
 #
 # OJO con los nombres: en Google el archivo se llama Code.gs, no
@@ -15,10 +16,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 USER_CLASP="${USER_CLASP:-spartacus}"
-# Proyecto Apps Script vinculado a la hoja CONTROL DE SPARTACUS
-# (cuenta robertoquirozr06@gmail.com). Es container-bound, por eso NO aparece
-# en `clasp list-scripts` y hay que traer el id a mano.
-SCRIPT_ID="${SCRIPT_ID:-1GeCqOnNg8tfPDiEcth-CCaVjuccaijpcFLmGYNQOPZYQc2a8OJsRVxD9}"
+# Proyecto Apps Script vinculado a la hoja de Espartaco. Es container-bound,
+# por eso NO aparece en `clasp list-scripts` y hay que traer el id a mano
+# (editor de Apps Script -> Configuracion del proyecto -> ID). Se toma de la
+# variable SCRIPT_ID o, si no, de APPS_SCRIPT_ID en .env, para no dejarlo
+# escrito en el repo.
+if [ -z "${SCRIPT_ID:-}" ] && [ -f .env ]; then
+  SCRIPT_ID="$(sed -n 's/^APPS_SCRIPT_ID=//p' .env | tr -d '\r"' | head -n1)"
+fi
+[ -n "${SCRIPT_ID:-}" ] || { echo "Falta APPS_SCRIPT_ID en .env (o SCRIPT_ID en el entorno)." >&2; exit 1; }
 
 # "archivo local:archivo remoto"
 MAPEO="apps_script/RecordatorioMedicamentos.gs:Code.js"

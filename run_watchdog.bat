@@ -1,7 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
-set "PROJECT_DIR=C:\Users\rober\Spartacus\asistente_ia"
+rem Carpeta del propio .bat (sin la barra final): el proyecto no queda atado
+rem a una ruta fija y funciona donde se clone.
+set "PROJECT_DIR=%~dp0"
+set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 set "PYTHON_EXE=%PROJECT_DIR%\venv\Scripts\python.exe"
 set "MAIN_SCRIPT=%PROJECT_DIR%\main.py"
 set "LOG_DIR=%PROJECT_DIR%\logs"

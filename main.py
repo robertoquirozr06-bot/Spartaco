@@ -151,15 +151,23 @@ if not DEEPSEEK_API_KEY:
     )
     sys.exit(1)
 
-logger.info(
-    "Restriccion de chat: %s",
-    ALLOWED_CHAT_ID if ALLOWED_CHAT_ID is not None else "ninguna (respondera en cualquier chat)"
-)
+if ALLOWED_CHAT_ID is None:
+    # Cerrado por defecto: sin ALLOWED_CHAT_ID cualquiera que encuentre el bot
+    # tendria acceso al Calendar/Sheets del dueno. Se sigue corriendo (no
+    # sys.exit) solo para poder averiguar el chat_id: cada mensaje queda en el
+    # log como "Chat no autorizado (chat_id=...)" y se ignora.
+    logger.critical(
+        "ALLOWED_CHAT_ID no esta definido en %s: el bot NO va a responder en ningun chat. "
+        "Escribele /start desde el grupo, copia el chat_id que aparece en el log, "
+        "ponlo en .env y vuelve a arrancar.", ENV_PATH
+    )
+else:
+    logger.info("Restriccion de chat: %s", ALLOWED_CHAT_ID)
 
 
 def is_chat_allowed(update: Update) -> bool:
     if ALLOWED_CHAT_ID is None:
-        return True
+        return False
     return update.effective_chat is not None and update.effective_chat.id == ALLOWED_CHAT_ID
 
 
@@ -249,7 +257,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Transcripcion apagada desde el 2026-09-29: DeepSeek no acepta audio y se
-    # dio de baja Gemini (que era quien transcribia). Decision de Roberto.
+    # dio de baja Gemini (que era quien transcribia). Decision del dueno.
     logger.info("Nota de voz recibida (transcripcion apagada) - chat_id=%s duracion=%ss", chat.id, message.voice.duration)
     await context.bot.send_message(
         chat_id=chat.id,

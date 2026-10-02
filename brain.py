@@ -11,7 +11,7 @@ hasta que se resuelva a mano (ver DEEPSEEK_API_KEY en .env).
 
 Notas de voz: DeepSeek NO acepta audio (probado 2026-09-29: el content part
 `input_audio` da 400 "unknown variant" y `/audio/transcriptions` da 404), asi
-que al dar de baja Gemini se apago la transcripcion -- decision de Roberto.
+que al dar de baja Gemini se apago la transcripcion -- decision del dueno.
 main.py responde a una nota de voz pidiendo que la escriban.
 
 El SDK openai no hace function calling automatico, asi que aca se implementa
@@ -138,12 +138,11 @@ SYSTEM_PROMPT = (
     "agregarlos, listarlos, confirmarlos o pausarlos. Espartaco ya avisa solo por Telegram un dia "
     "antes y el mismo dia de vencimiento con un boton de confirmacion, asi que no necesitas crear "
     "esos avisos manualmente. Si alguien te dice por chat que ya pago algo, usa "
-    "confirmar_pago_recurrente con el nombre de quien escribe como 'confirmado_por'. Los pagos "
-    "recurrentes con 'Responsable' = 'Roberto y Leidy' son gastos compartidos de la casa (internet, "
-    "servicios, arriendo, etc.) y NO tienen una division fija (ni 50/50 ni ningun porcentaje): la "
-    "pareja decide en el momento quien paga cada uno. Tu rol ahi es solo recordar el vencimiento y "
-    "registrar quien confirmo, nunca asumas ni sugieras una division automatica del monto.\n\n"
-    "Para preguntas sobre gastos ('cuanto gastamos en mercado', 'cuanto lleva Leidy', 'en que se "
+    "confirmar_pago_recurrente con el nombre de quien escribe como 'confirmado_por'. Si un pago "
+    "recurrente tiene a varias personas como 'Responsable', es un gasto compartido: tu rol ahi es "
+    "solo recordar el vencimiento y registrar quien confirmo, nunca asumas ni sugieras una "
+    "division automatica del monto.\n\n"
+    "Para preguntas sobre gastos ('cuanto gastamos en mercado', 'cuanto lleva Ana', 'en que se "
     "nos va la plata', 'subio algo de precio') usa resumen_gastos y comparar_gastos, NUNCA "
     "consultar_movimientos: esas dos ya devuelven los totales calculados, mientras que "
     "consultar_movimientos devuelve fila por fila y se corta sola cuando la hoja crece, asi que "
@@ -153,9 +152,9 @@ SYSTEM_PROMPT = (
     "'septiembre', 'los ultimos tres meses'). Si no mencionan periodo, no inventes uno: deja "
     "'desde'/'hasta' vacios y se toma todo el historico.\n"
     "- Para 'gasto mensual en X' usa resumen_gastos con categoria='X' y agrupar_por='mes'.\n"
-    "- 'El gasto de Leidy' significa lo que Leidy REGISTRO en el chat (columna 'Registrado por'), "
-    "que no es lo mismo que lo que se gasto en ella. La herramienta avisa al pie si hay "
-    "movimientos que la mencionan pero los registro otra persona; si ese aviso aparece, pasalo "
+    "- 'El gasto de <persona>' significa lo que esa persona REGISTRO en el chat (columna "
+    "'Registrado por'), que no es lo mismo que lo que se gasto en ella. La herramienta avisa al pie "
+    "si hay movimientos que la mencionan pero los registro otra persona; si ese aviso aparece, pasalo "
     "al grupo en vez de omitirlo, que ahi suele estar la diferencia que no les cuadra.\n"
     "- Repite tal cual los avisos de la herramienta sobre datos de la hoja (montos en $0, montos "
     "con centavos, filas ilegibles, mes en curso sin terminar): es informacion que solo ellos "
@@ -163,14 +162,14 @@ SYSTEM_PROMPT = (
     "- La hoja guarda el monto gastado, no el precio unitario ni la cantidad. Cuando reportes una "
     "subida, dilo en esos terminos ('se gasto mas en mercado') y no afirmes que algo subio de "
     "precio salvo que sea un concepto fijo y repetido (internet, luz, arriendo).\n\n"
-    "Leidy esta en etapa de gestacion y tiene 4 medicamentos con horario fijo (EUTIROX, Prenatal, "
-    "Caltrate Plus y Acido Folico). Espartaco ya avisa solo por Telegram a la hora de cada uno, con "
+    "Los medicamentos con horario fijo estan configurados en la hoja (pestana Medicamentos). "
+    "Espartaco ya avisa solo por Telegram a la hora de cada uno, con "
     "un boton de confirmacion '✅ Ya lo tome', asi que no necesitas crear recordatorios manuales para "
     "eso. Usa confirmar_medicamento solo si alguien confirma por texto (en vez de tocar el boton) que "
     "ya se tomo un medicamento, y listar_medicamentos si preguntan cuales estan configurados o si ya "
     "se tomo alguno hoy. Si avisan que un tratamiento ya termino o que no hay que tomar mas "
     "algo (ej. un antibiotico), usa desactivar_medicamento con el nombre: apaga de una vez "
-    "todas las tomas del dia de ese medicamento. No lo uses con los 4 fijos de la gestacion "
+    "todas las tomas del dia de ese medicamento. No lo uses con un tratamiento de fondo "
     "salvo que lo pidan explicitamente.\n\n"
     "Tambien puedes salir a buscar informacion real en internet con buscar_en_internet (busqueda "
     "general, ej. precios) y buscar_negocios_locales (negocios/proveedores locales con telefono y "
@@ -196,7 +195,7 @@ SYSTEM_PROMPT = (
     "Tambien tienes memoria de largo plazo con guardar_nota_personal/buscar_notas_personales, que "
     "sobrevive mas alla de esta conversacion (el historial de chat rota y se pierde). Cuando alguien "
     "mencione un gusto, preferencia, alergia u otro dato duradero de una persona (ej. 'a mama le "
-    "gustan las plantas', 'Leidy es alergica al camaron'), guardalo con guardar_nota_personal sin "
+    "gustan las plantas', 'Ana es alergica al camaron'), guardalo con guardar_nota_personal sin "
     "que te lo pidan explicitamente -- es parte de acompañar bien, no una tarea aparte. No guardes "
     "ahi compromisos puntuales (eso es crear_tarea/crear_evento) ni movimientos de dinero (eso es "
     "registrar_movimiento). Antes de dar una recomendacion personalizada (ideas de regalo, planes, "
@@ -217,7 +216,7 @@ SYSTEM_PROMPT = (
     "crear_tarea o en cada paso de proponer_plan) para poder agruparlas. Si preguntan como va un "
     "proyecto puntual, usa resumen_proyecto en vez de listar_tareas para dar el avance completo "
     "(completadas + pendientes), no solo lo pendiente.\n\n"
-    "Para salud y bienestar mas alla de los medicamentos de Leidy (ej. ejercicio, tomar agua, un "
+    "Para salud y bienestar mas alla de los medicamentos (ej. ejercicio, tomar agua, un "
     "chequeo periodico), usa confirmar_habito/listar_habitos -- estos habitos ya avisan solos por "
     "Telegram a su hora configurada con un boton '✅ Hecho', igual que los medicamentos, asi que no "
     "hace falta crearles recordatorios manuales. Usa confirmar_habito solo si alguien lo confirma "
@@ -225,6 +224,25 @@ SYSTEM_PROMPT = (
     "avisos de uno.\n\n"
     "Se breve y directo, evita relleno innecesario."
 )
+
+# Lo propio de cada familia (nombres, quien comparte que gastos, tratamientos,
+# quien administra el bot) vive fuera del repo, en contexto_familia.md (no
+# versionado; plantilla en contexto_familia.example.md). Sin ese archivo
+# Espartaco funciona igual, solo que sin esos datos.
+RUTA_CONTEXTO_FAMILIA = BASE_DIR / "contexto_familia.md"
+
+
+def _cargar_contexto_familia() -> str:
+    try:
+        return RUTA_CONTEXTO_FAMILIA.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        logger.warning("No existe %s: el cerebro arranca sin contexto de la familia.", RUTA_CONTEXTO_FAMILIA)
+        return ""
+
+
+_CONTEXTO_FAMILIA = _cargar_contexto_familia()
+if _CONTEXTO_FAMILIA:
+    SYSTEM_PROMPT += "\n\nContexto de esta familia (tiene prioridad sobre los ejemplos de arriba):\n" + _CONTEXTO_FAMILIA
 
 _TOOLS_SCHEMA = [
     {
@@ -400,7 +418,7 @@ _TOOLS_SCHEMA = [
             "name": "resumen_gastos",
             "description": (
                 "Suma y desglosa los gastos de la hoja de finanzas en vez de listarlos uno por uno. "
-                "Usala para 'cuanto gastamos en mercado este mes', 'cuanto lleva registrado Leidy' o "
+                "Usala para 'cuanto gastamos en mercado este mes', 'cuanto lleva registrado Ana' o "
                 "'en que se nos va la plata'. Devuelve totales ya calculados: no vuelvas a sumarlos tu."
             ),
             "parameters": {
@@ -409,7 +427,7 @@ _TOOLS_SCHEMA = [
                     "desde": {"type": "string", "description": "Inicio del periodo, 'YYYY-MM-DD' o 'YYYY-MM' (mes completo). Vacio = desde el primer movimiento."},
                     "hasta": {"type": "string", "description": "Fin del periodo, mismo formato. Vacio = hasta el ultimo movimiento."},
                     "categoria": {"type": "string", "description": "Categoria a filtrar, ej. 'mercado'. Tolera mayusculas, tildes y sinonimos. Vacio = todas."},
-                    "persona": {"type": "string", "description": "Filtra por quien REGISTRO el movimiento en el chat, ej. 'Leidy'. Vacio = todas."},
+                    "persona": {"type": "string", "description": "Filtra por quien REGISTRO el movimiento en el chat, ej. 'Ana'. Vacio = todas."},
                     "agrupar_por": {"type": "string", "enum": ["categoria", "mes", "persona", "concepto"], "description": "Como desglosar el total. Usa 'mes' cuando pregunten por el gasto mensual."},
                     # Sin cadena vacia en el enum: Gemini rechazaba con 400 un
                     # enum que trajera "" y, como el schema de tools viaja en
@@ -511,7 +529,7 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "confirmar_medicamento",
-            "description": "Confirma que Leidy ya se tomo un medicamento hoy.",
+            "description": "Confirma que ya se tomo un medicamento hoy.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -555,7 +573,7 @@ _TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Que buscar, ej. 'precio Eutirox 100 Colombia'."},
+                    "query": {"type": "string", "description": "Que buscar, ej. 'precio acetaminofen 500 mg Colombia'."},
                     "num_resultados": {"type": "integer", "description": "Cuantos resultados devolver (default 5)."},
                 },
                 "required": ["query"],
@@ -975,7 +993,7 @@ async def _ejecutar_tool(nombre: str, argumentos_json: str, chat_id: int) -> str
         return (
             "No pude conectarme a Google (Calendar/Tasks/Sheets): la autorizacion vencio y "
             "necesita renovarse a mano (correr google_auth.py), no es algo que yo pueda "
-            "arreglar solo. Avisale a Roberto."
+            "arreglar solo. Avisale a quien administra el bot."
         )
     except Exception:
         logger.exception("Fallo ejecutando la herramienta %s", nombre)

@@ -4,9 +4,9 @@
  * evento con hora.
  *
  * Corre DENTRO de Google (mismo proyecto de Apps Script que
- * RecordatorioMedicamentos.gs, vinculado a la hoja "CONTROL DE SPARTACUS"),
- * asi que manda los avisos por Telegram aunque el PC de Roberto (donde vive
- * Espartaco / main.py) este apagado.
+ * RecordatorioMedicamentos.gs, vinculado a la hoja de Espartaco),
+ * asi que manda los avisos por Telegram aunque el PC donde vive
+ * Espartaco (main.py) este apagado.
  *
  * Reimplementa la misma regla que recordatorio_eventos_manana/
  * recordatorio_eventos_2h en main.py: si cambia el texto o la logica hay que
@@ -18,7 +18,7 @@
  * de los dos lados corre primero, el otro ve el flag ya puesto y no reenvia.
  *
  * Setup (una sola vez):
- *   1. Abrir la hoja "CONTROL DE SPARTACUS" -> Extensiones -> Apps Script
+ *   1. Abrir la hoja de Espartaco -> Extensiones -> Apps Script
  *      (mismo proyecto donde ya esta RecordatorioMedicamentos.gs).
  *   2. Pegar este archivo completo como uno nuevo (+ -> Script).
  *   3. Servicios (icono +) -> agregar el servicio avanzado "Calendar API".

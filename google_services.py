@@ -949,7 +949,7 @@ async def resumen_gastos(
     """Suma los gastos de la hoja y los desglosa, en vez de listarlos uno por uno.
 
     Es la herramienta para "cuanto gastamos en mercado este mes", "cuanto lleva
-    registrado Leidy" o "en que se nos va la plata": devuelve totales ya
+    registrado Ana" o "en que se nos va la plata": devuelve totales ya
     calculados, no filas sueltas.
 
     Args:
@@ -959,7 +959,7 @@ async def resumen_gastos(
       categoria: Filtra por categoria, ej. 'mercado'. Tolera mayusculas,
         tildes y sinonimos ('supermercado' cuenta como 'mercado'). Vacio = todas.
       persona: Filtra por quien REGISTRO el movimiento en el chat (columna
-        'Registrado por'), ej. 'Leidy'. Vacio = todas.
+        'Registrado por'), ej. 'Ana'. Vacio = todas.
       agrupar_por: Como desglosar el total: 'categoria', 'mes', 'persona' o
         'concepto'. Por defecto 'categoria'.
       tipo: 'gasto' (por defecto), 'ingreso', o 'ambos' para incluir los dos.
@@ -1048,8 +1048,8 @@ async def resumen_gastos(
         resto = sum(suma for _, (suma, _) in filas[_MAX_LINEAS_DESGLOSE:])
         lineas.append(f"- (+{len(filas) - _MAX_LINEAS_DESGLOSE} mas, en total {_fmt_monto(resto)})")
 
-    # "Gasto de Leidy" se resuelve por la columna 'Registrado por', pero la hoja
-    # tiene filas como "Mercado Leidy" que registro otra persona. No se suman
+    # "Gasto de Ana" se resuelve por la columna 'Registrado por', pero la hoja
+    # tiene filas como "Mercado Ana" que registro otra persona. No se suman
     # (seria cambiar la pregunta), pero callarlas daria un total enganoso.
     if persona_norm:
         otros = [
@@ -1687,7 +1687,7 @@ async def desactivar_pago_recurrente(id: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Medicamentos (recordatorios diarios de Leidy, embarazo, con confirmacion)
+# Medicamentos (recordatorios diarios con confirmacion)
 # --------------------------------------------------------------------------
 # Columnas de la pestana "Medicamentos": ID, Nombre, Hora, Notas, Activo,
 # UltimoAvisoEnviado, UltimaTomaConfirmada (A-G). Igual que pagos recurrentes,
@@ -1800,7 +1800,7 @@ async def marcar_medicamento_enviado(fila: int, fecha_iso: str) -> None:
 
 
 async def confirmar_medicamento(id: str, confirmado_por: str = "") -> str:
-    """Confirma que Leidy ya se tomo un medicamento hoy.
+    """Confirma que ya se tomo un medicamento hoy.
 
     Args:
       id: Identificador del medicamento, tal como aparece en listar_medicamentos.
@@ -2012,7 +2012,7 @@ async def guardar_nota_personal(
     mas alla de lo que dura el historial de conversacion.
 
     Usala para hechos y preferencias que vale la pena recordar en el futuro
-    (ej. "a mama le gustan las plantas", "Leidy es alergica al camaron"), no
+    (ej. "a mama le gustan las plantas", "Ana es alergica al camaron"), no
     para tareas ni eventos puntuales -- esos van en crear_tarea/crear_evento.
 
     Args:
@@ -2022,7 +2022,7 @@ async def guardar_nota_personal(
       categoria: Etiqueta libre para agrupar la nota, por ejemplo 'Familia',
         'Salud' o 'Preferencias'. Opcional.
       vigente_hasta_iso: Si el hecho tiene una fecha de vencimiento natural
-        (ej. algo valido solo mientras Leidy esta en gestacion), fecha ISO
+        (ej. algo valido solo durante un embarazo o un tratamiento), fecha ISO
         8601 (solo fecha) despues de la cual ya no debes asumirlo como cierto.
         Dejar vacio si no vence.
       guardado_por: Nombre de quien lo menciono en el chat (viene en el

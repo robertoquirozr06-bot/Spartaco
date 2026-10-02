@@ -1,9 +1,9 @@
 /**
- * Fallback en la nube de los recordatorios de medicamentos de Leidy (embarazo).
+ * Fallback en la nube de los recordatorios de medicamentos.
  *
- * Corre DENTRO de Google (vinculado a la hoja "CONTROL DE SPARTACUS", pestana
- * "Medicamentos"), asi que manda los avisos por Telegram aunque el PC de
- * Roberto (donde vive Espartaco / main.py) este apagado.
+ * Corre DENTRO de Google (vinculado a la hoja de Espartaco, pestana
+ * "Medicamentos"), asi que manda los avisos por Telegram aunque el PC
+ * donde vive Espartaco (main.py) este apagado.
  *
  * Reimplementa la misma regla que google_services.calcular_recordatorios_medicamentos
  * en main.py: si se agrega/cambia un medicamento hay que actualizar los dos lados.
@@ -18,7 +18,7 @@
  * prender -- un solo lugar de verdad para las confirmaciones.
  *
  * Setup (una sola vez):
- *   1. Abrir la hoja "CONTROL DE SPARTACUS" -> Extensiones -> Apps Script.
+ *   1. Abrir la hoja de Espartaco -> Extensiones -> Apps Script.
  *   2. Pegar este archivo completo.
  *   3. Configuracion del proyecto -> Propiedades del script -> agregar
  *      TELEGRAM_TOKEN y ALLOWED_CHAT_ID (mismos valores que el .env de main.py).
@@ -100,7 +100,7 @@ function normalizarFechaISO(valor) {
  * Devuelve 'HH:mm'. La columna Hora hoy es texto, pero si alguien le aplica
  * formato de hora en la hoja pasaria a llegar como Date y el split(':') daria
  * 3 partes -> la fila se saltaria en silencio y el medicamento dejaria de
- * avisarse, que en un tratamiento de embarazo es peor que un aviso de mas.
+ * avisarse, que en un tratamiento es peor que un aviso de mas.
  */
 function normalizarHora(valor) {
   if (valor === '' || valor === null || valor === undefined) return '';

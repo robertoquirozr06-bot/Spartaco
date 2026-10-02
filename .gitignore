@@ -12,3 +12,8 @@ historial_chats.json
 latido.json
 # Respaldos del .env: mismos secretos adentro.
 .env.bak*
+# Datos propios de la familia que se agregan al prompt (plantilla: contexto_familia.example.md).
+contexto_familia.md
+# Documentacion interna con datos personales (salud, finanzas, cuentas): solo local.
+CLAUDE.md
+nota.md

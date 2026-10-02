@@ -4,11 +4,17 @@ Scheduler de Windows, para que sobrevivan un reinicio del PC sin tener que
 abrir nada a mano. Ya NO registra OmniRoute (2026-09-27): se dejo de usar
 por completo, ver .env y brain.py.
 
-Correr UNA SOLA VEZ, en una consola de PowerShell como Administrador:
+Correr UNA SOLA VEZ, en una consola de PowerShell como Administrador, desde
+la carpeta del proyecto:
 
-    powershell -ExecutionPolicy Bypass -File "C:\Users\rober\Spartacus\asistente_ia\setup_autostart.ps1"
+    powershell -ExecutionPolicy Bypass -File .\setup_autostart.ps1
 
-Es seguro volver a correrlo despues (usa /f, sobreescribe las tareas si ya existen).
+Las tareas apuntan a la carpeta donde vive este script, asi que si se mueve
+el proyecto basta con volver a correrlo. Es seguro repetirlo (usa /f,
+sobreescribe las tareas si ya existen).
+
+Las tareas corren run_watchdog_hidden.vbs (que a su vez llama a
+run_watchdog.bat) para que no se abra una ventana de consola cada 5 min.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,11 +25,14 @@ if (-not $esAdmin) {
     exit 1
 }
 
-Write-Host "Registrando tareas en el Task Scheduler...`n" -ForegroundColor Cyan
+$vbs = Join-Path $PSScriptRoot "run_watchdog_hidden.vbs"
+$accion = "wscript.exe `"$vbs`""
 
-schtasks /create /tn "Espartaco-OnLogon" /tr "`"C:\Users\rober\Spartacus\asistente_ia\run_watchdog.bat`"" /sc ONLOGON /rl LIMITED /f
+Write-Host "Registrando tareas en el Task Scheduler (apuntando a $PSScriptRoot)...`n" -ForegroundColor Cyan
 
-schtasks /create /tn "Espartaco-Watchdog-5min" /tr "`"C:\Users\rober\Spartacus\asistente_ia\run_watchdog.bat`"" /sc MINUTE /mo 5 /rl LIMITED /f
+schtasks /create /tn "Espartaco-OnLogon" /tr $accion /sc ONLOGON /rl LIMITED /f
+
+schtasks /create /tn "Espartaco-Watchdog-5min" /tr $accion /sc MINUTE /mo 5 /rl LIMITED /f
 
 Write-Host "`nVerificando estado..." -ForegroundColor Cyan
 foreach ($tarea in @("Espartaco-OnLogon", "Espartaco-Watchdog-5min")) {
