@@ -10,3 +10,5 @@ logs/
 estado_jobs.json
 historial_chats.json
 latido.json
+# Respaldos del .env: mismos secretos adentro.
+.env.bak*
