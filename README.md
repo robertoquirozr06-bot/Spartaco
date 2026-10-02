@@ -45,6 +45,16 @@ venv\Scripts\pip install -r requirements.txt      # Windows
 
 `setup_autostart.ps1`, corrido una vez en una consola de PowerShell **como Administrador**, registra dos tareas programadas (al iniciar sesión y cada 5 minutos) que ejecutan `run_watchdog.bat`. El watchdog relanza `main.py` si se cayó o si dejó de escuchar a Telegram, usando el latido que el bot escribe en `latido.json`.
 
+## Conexión con HEBE Agents (opcional)
+
+[hebe_webhook.py](hebe_webhook.py) expone a Espartaco como agente de [HEBE Agents](https://github.com/robertoquirozr06-bot/App_web_Hebe) por webhook, sin apagar el bot de Telegram:
+
+1. Copia `.env.hebe.example` a `.env.hebe` y completa `SPARTACO_DIR` (la carpeta con tu `.env` y `token.json`), `HEBE_AGENT_TOKEN` y `HEBE_WEBHOOK_SECRET` (el mismo valor que `AGENTS_WEBHOOK_SECRET` en HEBE).
+2. Arranca: `venv\Scripts\python.exe hebe_webhook.py`. Escucha en `http://127.0.0.1:8787/hebe/espartaco`.
+3. HEBE manda `{ runId, input: { mensaje }, callbackUrl }`; el puente responde 202 y entrega la respuesta en `callbackUrl` firmada con HMAC-SHA256 (`x-hebe-signature`).
+
+Usa un historial propio (`historial_hebe.json`): no lee ni pisa las conversaciones del grupo.
+
 ## Respaldo en la nube (opcional)
 
 [apps_script/](apps_script/) tiene dos scripts de Google Apps Script que se pegan en la hoja (Extensiones > Apps Script) para que los recordatorios de medicamentos y de eventos lleguen aunque el PC esté apagado. Las instrucciones están al inicio de cada archivo. Necesitan `TELEGRAM_TOKEN` y `ALLOWED_CHAT_ID` en las propiedades del script.

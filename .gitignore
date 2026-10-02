@@ -17,3 +17,8 @@ contexto_familia.md
 # Documentacion interna con datos personales (salud, finanzas, cuentas): solo local.
 CLAUDE.md
 nota.md
+
+# Puente con HEBE Agents (hebe_webhook.py): secretos e historial propio.
+.env.hebe
+historial_hebe.json
+historial_hebe.json.tmp
