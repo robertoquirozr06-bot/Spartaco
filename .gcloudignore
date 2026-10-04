@@ -1,0 +1,8 @@
+# Lo que se sube a Cloud Build (gcloud builds submit). Allowlist, igual que
+# .dockerignore: sin este archivo gcloud hereda el .gitignore, que no filtra
+# por ejemplo el venv de Windows.
+*
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!*.py

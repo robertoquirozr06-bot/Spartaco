@@ -34,13 +34,20 @@ VENTANA_RECORDATORIO_2H = timedelta(hours=2)
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
+# Estado que debe sobrevivir a un reinicio (latido, anti-duplicados, historial
+# en brain.py). En el PC es la carpeta del proyecto; en el contenedor de la
+# nube es /data, el disco persistente montado.
+DATA_DIR = Path(os.getenv("DATA_DIR", "").strip() or BASE_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# En el contenedor (LOG_TO_FILE=0) solo stdout: los logs se leen con
+# `docker logs`, que ya rota, y no hace falta llenar el disco con logs/.
+LOG_TO_FILE = os.getenv("LOG_TO_FILE", "1").strip() != "0"
 
 # Prueba de vida para el watchdog. La escribe el job `heartbeat` SOLO si el
 # polling de Telegram sigue activo, asi que su antiguedad distingue un bot sano
 # de uno congelado. Que el proceso exista no prueba que este escuchando.
-LATIDO_PATH = BASE_DIR / "latido.json"
+LATIDO_PATH = DATA_DIR / "latido.json"
 
 # Margen antes de que el proceso decida suicidarse al arrancar, por si el job
 # llegara a correr antes que el updater. Hoy no pasa (run_polling levanta el
@@ -99,15 +106,19 @@ def _en_turno_google(job):
             return await job(*args, **kwargs)
     return envoltura
 
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+if LOG_TO_FILE:
+    LOG_DIR.mkdir(exist_ok=True)
+    _log_handlers.append(
+        RotatingFileHandler(
+            LOG_DIR / "espartaco.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+        )
+    )
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        RotatingFileHandler(
-            LOG_DIR / "espartaco.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
-        ),
-    ],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("espartaco")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -877,7 +888,7 @@ TIMEOUT_JOB_HABITOS = 90
 # mensaje real en el chat (ver handle_message), no el poll en si.
 INTERVALO_POLL_VARIABLE = 1500
 
-ESTADO_JOBS_PATH = BASE_DIR / "estado_jobs.json"
+ESTADO_JOBS_PATH = DATA_DIR / "estado_jobs.json"
 
 
 def _leer_estado_jobs() -> dict:

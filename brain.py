@@ -46,7 +46,9 @@ import web_tools
 logger = logging.getLogger("espartaco")
 
 BASE_DIR = Path(__file__).resolve().parent
-HISTORIAL_PATH = BASE_DIR / "historial_chats.json"
+# Misma carpeta de estado que main.py (DATA_DIR): /data en el contenedor.
+DATA_DIR = Path(os.getenv("DATA_DIR", "").strip() or BASE_DIR)
+HISTORIAL_PATH = DATA_DIR / "historial_chats.json"
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 MAX_TOOL_HOPS = 8
@@ -229,7 +231,9 @@ SYSTEM_PROMPT = (
 # quien administra el bot) vive fuera del repo, en contexto_familia.md (no
 # versionado; plantilla en contexto_familia.example.md). Sin ese archivo
 # Espartaco funciona igual, solo que sin esos datos.
-RUTA_CONTEXTO_FAMILIA = BASE_DIR / "contexto_familia.md"
+RUTA_CONTEXTO_FAMILIA = Path(
+    os.getenv("CONTEXTO_FAMILIA_PATH", "").strip() or BASE_DIR / "contexto_familia.md"
+)
 
 
 def _cargar_contexto_familia() -> str:

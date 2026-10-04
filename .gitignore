@@ -10,6 +10,10 @@ logs/
 estado_jobs.json
 historial_chats.json
 latido.json
+# Temporales de escritura atomica (historial_chats.json.tmp).
+*.tmp
+# Carpeta de estado para probar el contenedor en local (DATA_DIR=/data).
+data/
 # Respaldos del .env: mismos secretos adentro.
 .env.bak*
 # Datos propios de la familia que se agregan al prompt (plantilla: contexto_familia.example.md).

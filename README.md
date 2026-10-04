@@ -55,6 +55,35 @@ venv\Scripts\pip install -r requirements.txt      # Windows
 
 Usa un historial propio (`historial_hebe.json`): no lee ni pisa las conversaciones del grupo.
 
+## Correr en un contenedor (servidor o nube)
+
+El [Dockerfile](Dockerfile) arma una imagen con solo el código (`*.py`) y las dependencias. Los secretos nunca entran a la imagen: [.dockerignore](.dockerignore) y [.gcloudignore](.gcloudignore) son listas de lo permitido. Está pensado para una VM pequeña (por ejemplo una e2-micro de Compute Engine) con un disco persistente montado en `/data`.
+
+En el contenedor, el estado vive en `/data` y se configura con variables de entorno. Si no las defines, todo funciona igual que en el PC:
+
+| Variable | Valor en el contenedor | Para qué |
+|---|---|---|
+| `DATA_DIR` | `/data` | `historial_chats.json`, `estado_jobs.json`, `latido.json` |
+| `GOOGLE_TOKEN_PATH` | `/data/token.json` | Token OAuth. Tiene que ser escribible porque se reescribe en cada refresh |
+| `CONTEXTO_FAMILIA_PATH` | `/data/contexto_familia.md` | Contexto opcional de la familia |
+| `LOG_TO_FILE` | `0` | Solo stdout (se lee con `docker logs`) |
+
+```bash
+docker build -t espartaco .
+docker run -d --name espartaco --restart=always \
+  --env-file .env \
+  -e DATA_DIR=/data -e GOOGLE_TOKEN_PATH=/data/token.json \
+  -e CONTEXTO_FAMILIA_PATH=/data/contexto_familia.md -e LOG_TO_FILE=0 \
+  -v /ruta/en/el/host:/data \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  espartaco
+```
+
+- El contenedor corre con el UID 10001, así que la carpeta del host tiene que pertenecerle (`chown 10001`).
+- El `token.json` se genera en un PC con navegador (`python google_auth.py`) y se copia a `/data`. Dentro del contenedor no se puede autorizar.
+- `--restart=always` hace de watchdog: el bot termina el proceso a propósito cuando deja de escuchar a Telegram, y Docker lo vuelve a levantar.
+- **Solo puede haber una instancia del bot a la vez.** Si queda otra corriendo (por ejemplo la del PC), Telegram responde `Conflict` y las dos se reinician sin parar.
+
 ## Respaldo en la nube (opcional)
 
 [apps_script/](apps_script/) tiene dos scripts de Google Apps Script que se pegan en la hoja (Extensiones > Apps Script) para que los recordatorios de medicamentos y de eventos lleguen aunque el PC esté apagado. Las instrucciones están al inicio de cada archivo. Necesitan `TELEGRAM_TOKEN` y `ALLOWED_CHAT_ID` en las propiedades del script.

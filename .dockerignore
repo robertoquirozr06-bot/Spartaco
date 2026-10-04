@@ -1,0 +1,5 @@
+# Allowlist: a la imagen solo entra lo de abajo. Cualquier archivo nuevo
+# (secretos, respaldos, logs) queda fuera por defecto.
+*
+!requirements.txt
+!*.py
