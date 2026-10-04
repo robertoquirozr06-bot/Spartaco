@@ -1,0 +1,22 @@
+[Unit]
+Description=Espartaco (bot de Telegram en contenedor)
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+# arrancar.sh crea el contenedor y termina; desde ahi lo vigila Docker
+# (--restart=always). systemd solo lo recrea en cada arranque de la VM, con
+# los secretos frescos de Secret Manager.
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOME=/root
+ExecStart=/opt/espartaco/arrancar.sh
+ExecStop=/usr/bin/docker stop espartaco
+# Si al arrancar la VM la red o Secret Manager aun no responden, reintenta.
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

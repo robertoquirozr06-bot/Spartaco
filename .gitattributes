@@ -1,0 +1,7 @@
+# Lo que corre en Linux (VM / contenedor) va siempre con LF: con CRLF, bash
+# falla con "$'\r': command not found" y systemd no lee bien la unidad.
+*.sh text eol=lf
+*.service text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+.gcloudignore text eol=lf

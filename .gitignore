@@ -14,6 +14,8 @@ latido.json
 *.tmp
 # Carpeta de estado para probar el contenedor en local (DATA_DIR=/data).
 data/
+# Configuracion de la VM generada desde .env (deploy/generar_config_env.py).
+config.env
 # Respaldos del .env: mismos secretos adentro.
 .env.bak*
 # Datos propios de la familia que se agregan al prompt (plantilla: contexto_familia.example.md).
