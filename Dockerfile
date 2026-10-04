@@ -19,7 +19,10 @@ COPY *.py ./
 
 # Usuario sin privilegios. En el host, la carpeta montada en /data tiene que
 # pertenecer a este UID (chown 10001) para que el bot pueda escribir ahi.
+# El chmod deja el codigo de solo lectura: subido desde Windows llega como
+# rw-rw-rw- y el bot podria reescribirse a si mismo.
 RUN useradd --uid 10001 --no-create-home espartaco \
+    && chmod 644 /app/*.py /app/requirements.txt \
     && mkdir -p /data \
     && chown espartaco /app /data
 USER espartaco
