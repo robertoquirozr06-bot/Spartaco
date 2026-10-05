@@ -1,6 +1,8 @@
 """Puente entre HEBE Agents y Espartaco (adaptador `webhook` de HEBE).
 
-HEBE hace POST /hebe/espartaco con {runId, input: {mensaje}, callbackUrl, ...}.
+HEBE hace POST /hebe/espartaco con {runId, input: {mensaje}, callbackUrl,
+conversationId, history, ...}. `history` es lo último de la conversación, ya
+recortado por HEBE; `conversationId` fija el chat_id de brain.
 El puente responde 202 al instante, Espartaco contesta en segundo plano y el
 resultado se entrega en `callbackUrl` firmado con HMAC-SHA256 en la cabecera
 `x-hebe-signature: sha256=<hex>`.
@@ -40,6 +42,8 @@ ORIGENES_CALLBACK = {
 RUTA = "/hebe/espartaco"
 MAX_CUERPO = 100_000
 MAX_MENSAJE = 8_000
+# HEBE ya manda el historial recortado (lib/agents/memory.ts); esto es solo un tope defensivo.
+MAX_HISTORIAL = 24
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -98,9 +102,28 @@ async def _entregar(callback_url: str, resultado: dict) -> None:
     logger.error("No se pudo entregar el resultado a %s", callback_url)
 
 
-async def _atender(run_id: str, mensaje: str, callback_url: str) -> None:
-    # Un chat por ejecución: cada tarea de HEBE arranca sin memoria de otras.
-    chat_id = -int(hashlib.sha256(run_id.encode()).hexdigest()[:12], 16)
+def _historial_valido(crudo) -> list[dict] | None:
+    if crudo is None:
+        return []
+    if not isinstance(crudo, list) or len(crudo) > MAX_HISTORIAL:
+        return None
+    limpio = []
+    for m in crudo:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            return None
+        contenido = m.get("content")
+        if not isinstance(contenido, str) or len(contenido) > MAX_MENSAJE:
+            return None
+        limpio.append({"role": m["role"], "content": contenido})
+    return limpio
+
+
+async def _atender(run_id: str, conversacion: str, mensaje: str, historial: list[dict], callback_url: str) -> None:
+    # HEBE es dueño de la memoria: cada tarea arranca solo con el historial que
+    # trae. El chat_id sale de la conversación (no de la ejecución) para que un
+    # plan propuesto siga pendiente cuando llega la confirmación en otro mensaje.
+    chat_id = -int(hashlib.sha256(conversacion.encode()).hexdigest()[:12], 16)
+    brain._historiales[chat_id] = historial
     try:
         respuesta = await brain.ask(chat_id, mensaje, remitente="HEBE")
         resultado = {"status": "succeeded", "output": respuesta}
@@ -143,16 +166,20 @@ class Puente(BaseHTTPRequestHandler):
             run_id = str(datos["runId"])
             mensaje = str(datos["input"]["mensaje"]).strip()
             callback_url = str(datos["callbackUrl"])
-        except (ValueError, KeyError, TypeError):
+            conversacion = str(datos.get("conversationId") or run_id)
+            historial = _historial_valido(datos.get("history"))
+        except (ValueError, KeyError, TypeError, AttributeError):
             return self._json(400, {"error": "Faltan runId, input.mensaje o callbackUrl."})
+        if historial is None:
+            return self._json(400, {"error": "history inválido."})
         if not mensaje or len(mensaje) > MAX_MENSAJE:
             return self._json(400, {"error": "El mensaje está vacío o es demasiado largo."})
         # El resultado solo viaja a HEBE: nunca a una URL que traiga la petición.
         if _origen(callback_url) not in ORIGENES_CALLBACK:
             return self._json(400, {"error": "callbackUrl no permitido."})
 
-        asyncio.run_coroutine_threadsafe(_atender(run_id, mensaje, callback_url), LOOP)
-        logger.info("Tarea aceptada %s", run_id)
+        asyncio.run_coroutine_threadsafe(_atender(run_id, conversacion, mensaje, historial, callback_url), LOOP)
+        logger.info("Tarea aceptada %s (historial: %s mensajes)", run_id, len(historial))
         self._json(202, {"accepted": True})
 
     def log_message(self, formato: str, *args) -> None:
