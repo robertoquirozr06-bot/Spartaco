@@ -38,7 +38,8 @@ serper_api_key="$(secreto serper-api-key 2>/dev/null || true)"
 # mientras se crea el contenedor.
 install -d -m 700 /run/espartaco
 SECRETOS=/run/espartaco/secretos.env
-trap 'rm -f "$SECRETOS"' EXIT
+SECRETOS_HEBE=/run/espartaco/secretos_hebe.env
+trap 'rm -f "$SECRETOS" "$SECRETOS_HEBE"' EXIT
 (
     umask 077
     {
@@ -68,3 +69,40 @@ docker run -d --name "$NOMBRE" --restart=always \
     "$IMAGEN"
 
 echo "Espartaco arriba con $IMAGEN"
+
+# --- Puente HEBE (opcional) ---
+# Solo arranca si existe hebe.env (configuracion no secreta: HEBE_CALLBACK_ORIGINS,
+# HEBE_PORT). Si algo falla aca, el bot de Telegram ya quedo arriba y sigue
+# atendiendo: el puente se salta con un aviso en vez de cortar el script.
+HEBE_ENV="$BASE/hebe.env"
+NOMBRE_HEBE=espartaco-hebe
+docker rm -f "$NOMBRE_HEBE" >/dev/null 2>&1 || true
+if [[ -f "$HEBE_ENV" ]]; then
+    if hebe_agent_token="$(secreto hebe-agent-token)" \
+        && hebe_webhook_secret="$(secreto hebe-webhook-secret)"; then
+        (
+            umask 077
+            {
+                # Sin TELEGRAM_TOKEN: el puente no habla con Telegram.
+                echo "DEEPSEEK_API_KEY=$deepseek_api_key"
+                [[ -n "$serper_api_key" ]] && echo "SERPER_API_KEY=$serper_api_key"
+                echo "HEBE_AGENT_TOKEN=$hebe_agent_token"
+                echo "HEBE_WEBHOOK_SECRET=$hebe_webhook_secret"
+                true
+            } > "$SECRETOS_HEBE"
+        )
+        # --network host: escucha en 127.0.0.1:8787 de la VM (no expuesto a
+        # internet) y le responde a HEBE por localhost, que con un tunel SSH
+        # (-L 8787 / -R 3000) llega al HEBE del PC.
+        docker run -d --name "$NOMBRE_HEBE" --restart=always --network host \
+            --env-file "$CONFIG" --env-file "$HEBE_ENV" --env-file "$SECRETOS_HEBE" \
+            -e GOOGLE_TOKEN_PATH=/data/token.json \
+            -e CONTEXTO_FAMILIA_PATH=/data/contexto_familia.md \
+            -v "$DATA":/data \
+            --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
+            "$IMAGEN" python hebe_webhook.py
+        echo "Puente HEBE arriba con $IMAGEN"
+    else
+        echo "AVISO: no se pudieron leer los secretos de HEBE; el puente no arranca." >&2
+    fi
+fi

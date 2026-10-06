@@ -12,7 +12,8 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=HOME=/root
 ExecStart=/opt/espartaco/arrancar.sh
-ExecStop=/usr/bin/docker stop espartaco
+# El "-" ignora el error si el puente HEBE no existe (es opcional).
+ExecStop=-/usr/bin/docker stop espartaco espartaco-hebe
 # Si al arrancar la VM la red o Secret Manager aun no responden, reintenta.
 Restart=on-failure
 RestartSec=30
