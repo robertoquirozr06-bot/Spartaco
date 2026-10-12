@@ -43,7 +43,7 @@ HABITOS_TAB = os.getenv("HABITOS_TAB", "Habitos").strip() or "Habitos"
 TIPOS_INICIATIVA = ("ideas_regalo", "recordatorio_generico")
 DIAS_RETENCION_INICIATIVAS = 90
 
-ETIQUETAS_TAREA = ("[Agente]", "[Persona 1]", "[Persona 2]")
+ETIQUETAS_TAREA = ("[Agente]", "[Roberto]", "[Leidy]")
 ZONA_HORARIA = ZoneInfo("America/Bogota")
 
 # El job que detecta medicamentos/habitos pendientes ahora revisa cada 25 min
@@ -284,7 +284,7 @@ async def crear_tarea(
     Args:
       titulo: Descripcion corta de la tarea, sin incluir la etiqueta.
       etiqueta: A quien corresponde. Debe ser exactamente uno de: '[Agente]'
-        (Espartaco la ejecuta solo), '[Persona 1]' o '[Persona 2]' (miembros
+        (Espartaco la ejecuta solo), '[Roberto]' o '[Leidy]' (miembros
         del equipo).
       notas: Detalles adicionales de la tarea (opcional).
       vencimiento_iso: Fecha limite en formato ISO 8601, solo fecha, por
@@ -322,7 +322,7 @@ async def listar_tareas(etiqueta: str = "", proyecto: str = "") -> str:
     """Lista las tareas pendientes (sin completar) de la lista de Espartaco.
 
     Args:
-      etiqueta: Si se especifica ('[Agente]', '[Persona 1]' o '[Persona 2]'),
+      etiqueta: Si se especifica ('[Agente]', '[Roberto]' o '[Leidy]'),
         solo lista las tareas de esa etiqueta. Si se deja vacio, lista todas.
       proyecto: Si se especifica, solo lista las tareas de ese proyecto (tal
         como se uso en crear_tarea). Se puede combinar con etiqueta.
@@ -542,7 +542,7 @@ async def proponer_plan(pasos: list[dict], chat_id: int) -> str:
 
     Args:
       pasos: Lista de pasos propuestos, cada uno con 'titulo' (str),
-        'etiqueta' (una de '[Agente]', '[Persona 1]', '[Persona 2]'),
+        'etiqueta' (una de '[Agente]', '[Roberto]', '[Leidy]'),
         'notas' (opcional), 'vencimiento_iso' (opcional, solo fecha ISO 8601)
         y 'proyecto' (opcional -- usa el mismo nombre en todos los pasos que
         pertenezcan al mismo proyecto personal, para poder consultar el

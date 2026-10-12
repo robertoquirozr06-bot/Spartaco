@@ -128,10 +128,12 @@ SYSTEM_PROMPT = (
     "Tienes herramientas para Google Calendar, Google Tasks y una hoja de finanzas en Google "
     "Sheets. Usalas cuando el pedido lo requiera en vez de inventar datos o fingir que hiciste "
     "algo; si una herramienta devuelve un aviso de que algo no esta configurado, dilo tal cual "
-    "al grupo. Para tareas de Google Tasks, la etiqueta ('[Agente]', '[Persona 1]' o "
-    "'[Persona 2]') es obligatoria: usa '[Agente]' para lo que tu mismo vas a hacer, y "
-    "'[Persona 1]'/'[Persona 2]' segun a quien del equipo se lo esten delegando en la "
-    "conversacion. Cada mensaje del usuario viene precedido de un contexto entre corchetes con "
+    "al grupo. Para tareas de Google Tasks, la etiqueta ('[Agente]', '[Roberto]' o "
+    "'[Leidy]') es obligatoria: usa '[Agente]' para lo que tu mismo vas a hacer, y "
+    "'[Roberto]'/'[Leidy]' segun a quien del equipo se lo esten delegando en la "
+    "conversacion. En Telegram, Leidy aparece con el nombre 'JP': 'JP' y 'Leidy' son la misma "
+    "persona, asi que una tarea para JP lleva '[Leidy]'. Si quien escribe dice 'recuerdame' o "
+    "'tengo que', la tarea es para quien escribe. Cada mensaje del usuario viene precedido de un contexto entre corchetes con "
     "la fecha/hora actual y quien esta escribiendo: usa la fecha/hora para calcular fechas "
     "relativas ('mañana', 'el viernes', 'en dos horas') antes de llamar a una herramienta, y usa "
     "el nombre de quien escribe como 'registrado_por' al registrar un movimiento financiero. No "
@@ -190,12 +192,12 @@ SYSTEM_PROMPT = (
     "- Las partes de investigacion que tu mismo puedes hacer con tus herramientas (buscar precios, "
     "buscar diseños, comparar opciones) hazlas de una vez dentro de la misma conversacion -- no las "
     "archives como tarea '[Agente]', porque hoy nada ejecuta esas tareas solas mas adelante. "
-    "crear_tarea/proponer_plan son solo para lo que una persona del equipo ('[Persona 1]' o "
-    "'[Persona 2]') tiene que hacer fuera del chat: llamar, visitar, decidir, pagar.\n"
+    "crear_tarea/proponer_plan son solo para lo que una persona del equipo ('[Roberto]' o "
+    "'[Leidy]') tiene que hacer fuera del chat: llamar, visitar, decidir, pagar.\n"
     "- Para un pedido de una sola tarea puntual y explicita segui usando crear_tarea directo, como "
     "siempre.\n"
-    "- Seguimiento: cada dia a las 8:10am el sistema avisa en el chat las tareas de '[Persona 1]'/"
-    "'[Persona 2]' que vencen ese dia, con un boton '✅ Hecho'. Si una no se marca, al dia "
+    "- Seguimiento: cada dia a las 8:10am el sistema avisa en el chat las tareas de '[Roberto]'/"
+    "'[Leidy]' que vencen ese dia, con un boton '✅ Hecho'. Si una no se marca, al dia "
     "siguiente se pasa sola a ese dia y se vuelve a avisar, hasta que se complete. Por eso todo "
     "paso para una persona debe llevar vencimiento_iso: sin fecha no hay seguimiento. Al confirmar "
     "un plan, cuentale al usuario que le vas a avisar el dia de cada fecha. Si alguien dice por "
@@ -304,7 +306,7 @@ _TOOLS_SCHEMA = [
                     "titulo": {"type": "string", "description": "Descripcion corta, sin incluir la etiqueta."},
                     "etiqueta": {
                         "type": "string",
-                        "enum": ["[Agente]", "[Persona 1]", "[Persona 2]"],
+                        "enum": ["[Agente]", "[Roberto]", "[Leidy]"],
                         "description": "A quien corresponde la tarea.",
                     },
                     "notas": {"type": "string", "description": "Detalles adicionales (opcional)."},
@@ -332,7 +334,7 @@ _TOOLS_SCHEMA = [
                     "etiqueta": {
                         "type": "string",
                         "description": (
-                            "Una de '[Agente]', '[Persona 1]' o '[Persona 2]' para filtrar. "
+                            "Una de '[Agente]', '[Roberto]' o '[Leidy]' para filtrar. "
                             "Dejar vacio ('') para listar todas."
                         ),
                     },
@@ -640,7 +642,7 @@ _TOOLS_SCHEMA = [
                                 "titulo": {"type": "string", "description": "Descripcion corta del paso, sin la etiqueta."},
                                 "etiqueta": {
                                     "type": "string",
-                                    "enum": ["[Agente]", "[Persona 1]", "[Persona 2]"],
+                                    "enum": ["[Agente]", "[Roberto]", "[Leidy]"],
                                     "description": "A quien corresponde el paso.",
                                 },
                                 "notas": {"type": "string", "description": "Detalles adicionales (opcional)."},

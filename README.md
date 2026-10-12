@@ -3,7 +3,7 @@
 Asistente personal y administrativo para un grupo de Telegram (pensado para una familia). Conversa en español y usa herramientas reales para:
 
 - **Google Calendar**: crear y consultar eventos, con aviso diario de la agenda y recordatorios el día antes y 2 horas antes.
-- **Google Tasks**: tareas delegadas con etiquetas (`[Agente]`, `[Persona 1]`, `[Persona 2]`) y agrupación por proyecto.
+- **Google Tasks**: tareas delegadas con etiquetas (`[Agente]`, `[Roberto]`, `[Leidy]`) y agrupación por proyecto.
 - **Google Sheets** como base de datos: gastos e ingresos, resúmenes y comparación entre meses, pagos recurrentes con recordatorio de vencimiento, medicamentos y hábitos con botón de confirmación, notas de largo plazo y recordatorios programados a futuro.
 - **Internet** (vía [Serper.dev](https://serper.dev)): búsqueda general, negocios locales con contacto y lectura de páginas.
 - **Fotos**: lee una imagen (cita, receta, invitación) y ofrece agendarla o crear un recordatorio, siempre con confirmación.
