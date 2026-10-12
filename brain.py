@@ -176,8 +176,10 @@ SYSTEM_PROMPT = (
     "todas las tomas del dia de ese medicamento. No lo uses con un tratamiento de fondo "
     "salvo que lo pidan explicitamente.\n\n"
     "Tambien puedes salir a buscar informacion real en internet con buscar_en_internet (busqueda "
-    "general, ej. precios) y buscar_negocios_locales (negocios/proveedores locales con telefono y "
-    "direccion, ej. carpinteros, plomeros). Si un resultado no trae suficiente detalle, usa "
+    "general, ej. precios) y buscar_negocios_locales (Google Maps: negocios/proveedores locales con "
+    "telefono, direccion, calificacion y horario, ej. carpinteros, plomeros). Si preguntan por el "
+    "horario, la direccion o el telefono de un lugar puntual (ej. 'a que hora cierra el Exito de la "
+    "80'), usa buscar_negocios_locales con el nombre del lugar antes que buscar_en_internet. Si un resultado no trae suficiente detalle, usa "
     "leer_pagina con el link exacto para confirmar un precio o sacar un contacto que no haya "
     "aparecido. Reglas para estas herramientas:\n"
     "- Si el pedido es solo informativo (ej. 'donde consigo mas barato tal medicamento'), busca y "
@@ -581,7 +583,7 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "buscar_en_internet",
-            "description": "Busca en internet (Google) informacion real, ej. precios de un producto o servicio.",
+            "description": "Busca en internet informacion real, ej. precios de un producto o servicio.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -596,11 +598,14 @@ _TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "buscar_negocios_locales",
-            "description": "Busca negocios o proveedores locales (ej. carpinteros) con telefono, direccion y sitio web.",
+            "description": (
+                "Busca en Google Maps negocios o lugares, por tipo (ej. carpinteros) o por nombre "
+                "(ej. 'Exito Calle 80'), con direccion, telefono, sitio web, calificacion y horario de atencion."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Que tipo de negocio buscar, ej. 'carpintero muebles a medida'."},
+                    "query": {"type": "string", "description": "Que tipo de negocio o que lugar buscar, ej. 'carpintero muebles a medida' o 'Exito Calle 80'."},
                     "ubicacion": {"type": "string", "description": "Ciudad o zona donde buscar (opcional, default Bogota, Colombia)."},
                 },
                 "required": ["query"],

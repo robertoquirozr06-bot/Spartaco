@@ -5,7 +5,7 @@ Asistente personal y administrativo para un grupo de Telegram (pensado para una 
 - **Google Calendar**: crear y consultar eventos, con aviso diario de la agenda y recordatorios el día antes y 2 horas antes.
 - **Google Tasks**: tareas delegadas con etiquetas (`[Agente]`, `[Roberto]`, `[Leidy]`) y agrupación por proyecto.
 - **Google Sheets** como base de datos: gastos e ingresos, resúmenes y comparación entre meses, pagos recurrentes con recordatorio de vencimiento, medicamentos y hábitos con botón de confirmación, notas de largo plazo y recordatorios programados a futuro.
-- **Internet** (vía [Serper.dev](https://serper.dev)): búsqueda general, negocios locales con contacto y lectura de páginas.
+- **Internet**: búsqueda general vía [Tavily](https://tavily.com), negocios y lugares de Google Maps (dirección, teléfono, calificación, horario) vía [Serper.dev](https://serper.dev), y lectura de páginas.
 - **Fotos**: lee una imagen (cita, receta, invitación) y ofrece agendarla o crear un recordatorio, siempre con confirmación.
 
 El razonamiento lo hace un modelo de [DeepSeek](https://api-docs.deepseek.com/) por su API compatible con OpenAI, con un loop manual de *function calling* en [brain.py](brain.py).
@@ -15,7 +15,7 @@ El razonamiento lo hace un modelo de [DeepSeek](https://api-docs.deepseek.com/) 
 - Python 3.12 o superior (desarrollado con 3.14).
 - Un bot de Telegram (créalo con [@BotFather](https://t.me/BotFather)) agregado a tu grupo.
 - Un proyecto de Google Cloud con las APIs de Calendar, Tasks y Sheets habilitadas y un cliente OAuth de tipo **escritorio**.
-- Una API key de DeepSeek y, opcionalmente, una de Serper.dev.
+- Una API key de DeepSeek y, opcionalmente, una de Tavily (búsqueda web) y una de Serper.dev (Google Maps). Las dos tienen plan gratis sin tarjeta: Tavily da 1.000 búsquedas al mes que se renuevan, y Serper 2.500 en total, una sola vez. Sin estas keys, las herramientas de búsqueda avisan que falta configurarlas y el resto del bot funciona igual.
 
 ## Instalación
 

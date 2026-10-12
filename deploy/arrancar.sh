@@ -31,7 +31,9 @@ chown -R "$UID_BOT" "$DATA"
 # corta aca en vez de crear el contenedor con la variable vacia.
 telegram_token="$(secreto telegram-token)"
 deepseek_api_key="$(secreto deepseek-api-key)"
-# Opcional: sin este secreto, las busquedas en internet avisan que falta configurar.
+# Opcionales: sin estos secretos, las busquedas en internet / Google Maps
+# avisan que falta configurar.
+tavily_api_key="$(secreto tavily-api-key 2>/dev/null || true)"
 serper_api_key="$(secreto serper-api-key 2>/dev/null || true)"
 
 # Los secretos pasan por un archivo en /run (RAM, nunca toca el disco) solo
@@ -45,6 +47,7 @@ trap 'rm -f "$SECRETOS" "$SECRETOS_HEBE"' EXIT
     {
         echo "TELEGRAM_TOKEN=$telegram_token"
         echo "DEEPSEEK_API_KEY=$deepseek_api_key"
+        [[ -n "$tavily_api_key" ]] && echo "TAVILY_API_KEY=$tavily_api_key"
         [[ -n "$serper_api_key" ]] && echo "SERPER_API_KEY=$serper_api_key"
         true
     } > "$SECRETOS"
@@ -85,6 +88,7 @@ if [[ -f "$HEBE_ENV" ]]; then
             {
                 # Sin TELEGRAM_TOKEN: el puente no habla con Telegram.
                 echo "DEEPSEEK_API_KEY=$deepseek_api_key"
+                [[ -n "$tavily_api_key" ]] && echo "TAVILY_API_KEY=$tavily_api_key"
                 [[ -n "$serper_api_key" ]] && echo "SERPER_API_KEY=$serper_api_key"
                 echo "HEBE_AGENT_TOKEN=$hebe_agent_token"
                 echo "HEBE_WEBHOOK_SECRET=$hebe_webhook_secret"

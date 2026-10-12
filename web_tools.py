@@ -8,10 +8,14 @@ function calling (firma tipada + docstring), nunca lanza al modelo -- si algo
 falla (falta la API key, error de red, timeout) devuelve un texto de aviso en
 espanol en vez de una excepcion.
 
-Usa Serper.dev (https://serper.dev) como motor de busqueda: envuelve
-resultados de Google, incluye un endpoint /places con negocios locales
-(telefono, direccion, sitio web) que resuelve directo el caso de "buscar
-carpinteros con contacto".
+Dos proveedores:
+- Tavily (https://tavily.com) para la busqueda web general: 1.000 creditos
+  gratis al mes que se renuevan (una busqueda "basic" = 1 credito). Si falta
+  su key o falla, buscar_en_internet cae a Serper /search como respaldo.
+- Serper.dev (https://serper.dev) endpoint /maps para negocios y lugares:
+  devuelve direccion, telefono, sitio web, calificacion y horario de atencion
+  de Google Maps, asi resuelve tanto "buscar carpinteros con contacto" como
+  "a que hora cierra tal lugar".
 """
 import asyncio
 import ipaddress
@@ -27,8 +31,12 @@ logger = logging.getLogger("espartaco")
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
 SERPER_UBICACION_DEFAULT = os.getenv("SERPER_UBICACION_DEFAULT", "Bogotá, Colombia").strip() or "Bogotá, Colombia"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 
 _BASE_URL = "https://google.serper.dev"
+_TAVILY_URL = "https://api.tavily.com/search"
+_MAX_CHARS_FRAGMENTO = 500
+_MAX_LUGARES = 8
 _TIMEOUT_BUSQUEDA = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 _TIMEOUT_PAGINA = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=5.0)
 _USER_AGENT = (
@@ -72,14 +80,14 @@ async def _motivo_url_bloqueada(url: httpx.URL) -> str | None:
     return None
 
 
-def _falta_api_key() -> str | None:
+def _falta_serper() -> str | None:
     if not SERPER_API_KEY:
-        return "No puedo buscar en internet todavia: falta configurar SERPER_API_KEY en .env."
+        return "No puedo buscar en Google Maps todavia: falta configurar SERPER_API_KEY en .env."
     return None
 
 
 async def buscar_en_internet(query: str, num_resultados: int = 5) -> str:
-    """Busca en internet (via Google, Serper.dev) y devuelve los resultados.
+    """Busca en internet (via Tavily, con Serper.dev de respaldo) y devuelve los resultados.
 
     Args:
       query: Que buscar, en lenguaje natural, ej. 'precio acetaminofen 500 mg Colombia'.
@@ -89,11 +97,66 @@ async def buscar_en_internet(query: str, num_resultados: int = 5) -> str:
       Texto con titulo, link y fragmento de cada resultado encontrado (el
       fragmento a veces ya trae un precio), o un aviso si no hay resultados.
     """
-    aviso = _falta_api_key()
-    if aviso:
-        return aviso
+    if not TAVILY_API_KEY and not SERPER_API_KEY:
+        return "No puedo buscar en internet todavia: falta configurar TAVILY_API_KEY en .env."
 
-    body = {"q": query, "num": max(1, min(num_resultados, 10)), "gl": "co", "hl": "es"}
+    num_resultados = max(1, min(num_resultados, 10))
+    if TAVILY_API_KEY:
+        resultado = await _buscar_web_tavily(query, num_resultados)
+        if resultado is not None:
+            return resultado
+        if not SERPER_API_KEY:
+            return "No pude completar la busqueda en internet ahora mismo."
+        logger.info("buscar_en_internet: Tavily fallo, se usa Serper de respaldo para %r", query)
+    return await _buscar_web_serper(query, num_resultados)
+
+
+async def _buscar_web_tavily(query: str, num_resultados: int) -> str | None:
+    """Busqueda via Tavily. Devuelve None si fallo (red, timeout, cupo agotado)
+    para que buscar_en_internet pruebe con Serper."""
+    body = {
+        "query": query,
+        "max_results": num_resultados,
+        "search_depth": "basic",  # 1 credito; "advanced" cuesta 2
+        "topic": "general",
+        "country": "colombia",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_BUSQUEDA) as client:
+            resp = await client.post(
+                _TAVILY_URL,
+                headers={"Authorization": f"Bearer {TAVILY_API_KEY}", "Content-Type": "application/json"},
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.TimeoutException:
+        logger.warning("buscar_en_internet: timeout de Tavily buscando %r", query)
+        return None
+    except httpx.HTTPStatusError as e:
+        # 432/433 = cupo del plan agotado, 401 = key invalida.
+        logger.warning("buscar_en_internet: Tavily respondio %s buscando %r", e.response.status_code, query)
+        return None
+    except Exception:
+        logger.exception("buscar_en_internet: Tavily fallo buscando %r", query)
+        return None
+
+    resultados = data.get("results", [])
+    if not resultados:
+        return f"No encontre resultados para '{query}'."
+
+    lineas = [f"Resultados para '{query}':"]
+    for r in resultados[:num_resultados]:
+        titulo = r.get("title") or "(sin titulo)"
+        link = r.get("url", "")
+        fragmento = " ".join((r.get("content") or "").split())[:_MAX_CHARS_FRAGMENTO]
+        lineas.append(f"- {titulo}\n  {link}\n  {fragmento}")
+    return "\n".join(lineas)
+
+
+async def _buscar_web_serper(query: str, num_resultados: int) -> str:
+    """Busqueda via Serper /search (respaldo de Tavily)."""
+    body = {"q": query, "num": num_resultados, "gl": "co", "hl": "es"}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_BUSQUEDA) as client:
             resp = await client.post(
@@ -104,10 +167,10 @@ async def buscar_en_internet(query: str, num_resultados: int = 5) -> str:
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException:
-        logger.warning("buscar_en_internet: timeout buscando %r", query)
+        logger.warning("buscar_en_internet: timeout de Serper buscando %r", query)
         return "La busqueda tardo demasiado y se cancelo, intenta de nuevo."
     except Exception:
-        logger.exception("buscar_en_internet fallo buscando %r", query)
+        logger.exception("buscar_en_internet: Serper fallo buscando %r", query)
         return "No pude completar la busqueda en internet ahora mismo."
 
     organicos = data.get("organic", [])
@@ -123,51 +186,74 @@ async def buscar_en_internet(query: str, num_resultados: int = 5) -> str:
     return "\n".join(lineas)
 
 
+def _formatear_horario(horario) -> str:
+    """openingHours de Serper /maps viene como dict dia -> horas; se tolera
+    tambien lista o texto por si cambia el formato."""
+    if isinstance(horario, dict):
+        return "; ".join(f"{dia}: {horas}" for dia, horas in horario.items())
+    if isinstance(horario, list):
+        return "; ".join(str(h) for h in horario)
+    return str(horario or "")
+
+
 async def buscar_negocios_locales(query: str, ubicacion: str = "") -> str:
-    """Busca negocios/proveedores locales (ej. carpinteros, plomeros) con su
-    contacto, via Google Places (Serper.dev).
+    """Busca en Google Maps (via Serper.dev) negocios o lugares, por tipo
+    (ej. carpinteros, plomeros) o por nombre (ej. 'Exito Calle 80'), con su
+    direccion, telefono, sitio web, calificacion y horario de atencion.
 
     Args:
-      query: Que tipo de negocio buscar, ej. 'carpintero muebles a medida'.
+      query: Que tipo de negocio o que lugar buscar, ej. 'carpintero muebles a medida'.
       ubicacion: Ciudad/zona donde buscar (opcional, default Bogota, Colombia).
 
     Returns:
-      Texto con nombre, direccion, telefono y sitio web de cada negocio
-      encontrado, o un aviso si no hay resultados.
+      Texto con los datos de cada lugar encontrado, o un aviso si no hay resultados.
     """
-    aviso = _falta_api_key()
+    aviso = _falta_serper()
     if aviso:
         return aviso
 
-    body = {"q": query, "location": ubicacion.strip() or SERPER_UBICACION_DEFAULT, "gl": "co", "hl": "es"}
+    # /maps no recibe "location" (solo coordenadas en "ll"): la zona va en la consulta.
+    consulta = f"{query} en {ubicacion.strip() or SERPER_UBICACION_DEFAULT}"
+    body = {"q": consulta, "gl": "co", "hl": "es"}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_BUSQUEDA) as client:
             resp = await client.post(
-                f"{_BASE_URL}/places",
+                f"{_BASE_URL}/maps",
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                 json=body,
             )
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException:
-        logger.warning("buscar_negocios_locales: timeout buscando %r", query)
+        logger.warning("buscar_negocios_locales: timeout buscando %r", consulta)
         return "La busqueda tardo demasiado y se cancelo, intenta de nuevo."
     except Exception:
-        logger.exception("buscar_negocios_locales fallo buscando %r", query)
-        return "No pude completar la busqueda de negocios locales ahora mismo."
+        logger.exception("buscar_negocios_locales fallo buscando %r", consulta)
+        return "No pude completar la busqueda en Google Maps ahora mismo."
 
     lugares = data.get("places", [])
     if not lugares:
-        return f"No encontre negocios locales para '{query}'."
+        return f"No encontre lugares en Google Maps para '{consulta}'."
 
-    lineas = [f"Negocios encontrados para '{query}':"]
-    for p in lugares:
+    lineas = [f"Lugares encontrados en Google Maps para '{consulta}':"]
+    for p in lugares[:_MAX_LUGARES]:
         nombre = p.get("title", "(sin nombre)")
-        direccion = p.get("address", "sin direccion")
-        telefono = p.get("phoneNumber", "sin telefono")
-        sitio = p.get("website", "")
-        extra = f", {sitio}" if sitio else ""
-        lineas.append(f"- {nombre} — {direccion} — tel: {telefono}{extra}")
+        categoria = p.get("type", "")
+        partes = [f"- {nombre}" + (f" ({categoria})" if categoria else "")]
+        partes.append(f"  Direccion: {p.get('address') or 'sin dato'}")
+        partes.append(f"  Tel: {p.get('phoneNumber') or 'sin dato'}")
+        if p.get("website"):
+            partes.append(f"  Web: {p['website']}")
+        if p.get("rating"):
+            resenas = f" ({p['ratingCount']} resenas)" if p.get("ratingCount") else ""
+            partes.append(f"  Calificacion: {p['rating']}{resenas}")
+        horario = _formatear_horario(p.get("openingHours"))
+        partes.append(f"  Horario: {horario or 'sin dato'}")
+        if p.get("cid"):
+            partes.append(f"  Mapa: https://maps.google.com/?cid={p['cid']}")
+        elif p.get("placeId"):
+            partes.append(f"  Mapa: https://www.google.com/maps/place/?q=place_id:{p['placeId']}")
+        lineas.append("\n".join(partes))
     return "\n".join(lineas)
 
 
