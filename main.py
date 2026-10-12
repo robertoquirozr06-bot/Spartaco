@@ -30,6 +30,7 @@ ZONA_HORARIA = ZoneInfo("America/Bogota")
 HORA_ALERTA_CALENDARIO = dt_time(hour=8, minute=0, tzinfo=ZONA_HORARIA)
 HORA_ALERTA_PAGOS = dt_time(hour=8, minute=5, tzinfo=ZONA_HORARIA)
 HORA_ALERTA_EVENTOS_MANANA = dt_time(hour=20, minute=0, tzinfo=ZONA_HORARIA)
+HORA_SEGUIMIENTO_TAREAS = dt_time(hour=8, minute=10, tzinfo=ZONA_HORARIA)
 VENTANA_RECORDATORIO_2H = timedelta(hours=2)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -817,6 +818,7 @@ async def _revisar_pendientes_por_actividad(context: ContextTypes.DEFAULT_TYPE) 
         recordatorio_eventos_manana,
         recordatorio_eventos_2h,
         revisar_iniciativas_proactivas,
+        seguimiento_tareas,
     ):
         try:
             await job(context)
@@ -880,6 +882,7 @@ TIMEOUT_JOB_INICIATIVAS = 60
 TIMEOUT_JOB_LIMPIEZA_INICIATIVAS = 60
 DIAS_ENTRE_LIMPIEZAS_INICIATIVAS = 30
 TIMEOUT_JOB_HABITOS = 90
+TIMEOUT_JOB_TAREAS = 90
 
 # Antes cada uno de estos jobs revisaba la hoja cada 5 min (300s), 24/7, sin
 # importar si de verdad habia algo por revisar. Se subio a 25 min para bajar
@@ -1052,6 +1055,56 @@ async def _recordatorio_habitos_impl(context: ContextTypes.DEFAULT_TYPE) -> None
             await google_services.marcar_habito_enviado(h["fila"], hoy)
         except Exception:
             logger.exception("Fallo enviando el recordatorio de habito '%s'.", h.get("id"))
+
+
+@_en_turno_google
+async def seguimiento_tareas(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await asyncio.wait_for(_seguimiento_tareas_impl(context), timeout=TIMEOUT_JOB_TAREAS)
+    except asyncio.TimeoutError:
+        logger.error("seguimiento_tareas: timeout (%ss), se salta esta ejecucion.", TIMEOUT_JOB_TAREAS)
+
+
+async def _seguimiento_tareas_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avisa las tareas con fecha de hoy y pasa a hoy las que vencieron sin
+    completarse, cada una con su boton "✅ Hecho". Asi una tarea de un plan se
+    vuelve a recordar todos los dias hasta que alguien la marque."""
+    if ALLOWED_CHAT_ID is None:
+        logger.warning("ALLOWED_CHAT_ID no configurado; salto el seguimiento de tareas.")
+        return
+
+    ahora = datetime.now(ZONA_HORARIA)
+    if ahora.time() < HORA_SEGUIMIENTO_TAREAS.replace(tzinfo=None):
+        return  # todavia no toca hoy
+
+    hoy = ahora.date()
+    hoy_iso = hoy.isoformat()
+    estado = _leer_estado_jobs()
+    if estado.get("ultimo_seguimiento_tareas") == hoy_iso:
+        return  # ya se hizo hoy (lo llama tambien _revisar_pendientes_por_actividad)
+
+    for t in await google_services.tareas_para_seguimiento(hoy_iso):
+        try:
+            if t["due_iso"] < hoy_iso:
+                await google_services.reprogramar_tarea(t["id"], hoy_iso, t["notas"], t["due_iso"])
+                original = date.fromisoformat(t["fecha_original_iso"])
+                dias = (hoy - original).days
+                texto = (
+                    f"⏩ Pendiente: {t['titulo']}\n"
+                    f"Era para el {original.strftime('%d/%m')} y no se marco, la pase a hoy "
+                    f"(lleva {dias} dia(s) de atraso)."
+                )
+            else:
+                texto = f"📋 Para hoy: {t['titulo']}"
+            teclado = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ Hecho", callback_data=f"tarea:{t['id']}")]]
+            )
+            await context.bot.send_message(chat_id=ALLOWED_CHAT_ID, text=texto, reply_markup=teclado)
+        except Exception:
+            logger.exception("Fallo el seguimiento de la tarea '%s'.", t.get("id"))
+
+    estado["ultimo_seguimiento_tareas"] = hoy_iso
+    _guardar_estado_jobs(estado)
 
 
 @_en_turno_google
@@ -1311,6 +1364,38 @@ async def confirmar_medicamento_callback(update: Update, context: ContextTypes.D
         )
 
 
+async def confirmar_tarea_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_chat_allowed(update):
+        await query.answer()
+        return
+
+    _, tarea_id = query.data.split(":", 1)
+    remitente = query.from_user.first_name if query.from_user else ""
+
+    try:
+        resultado = await _con_reintento_red(lambda: google_services.completar_tarea(tarea_id))
+    except Exception:
+        logger.exception("Fallo completando la tarea '%s' tras reintentos.", tarea_id)
+        resultado = ""
+    if not resultado.startswith("Tarea completada"):
+        await query.answer(
+            text="No pude marcarla como hecha. Intenta de nuevo en un momento.",
+            show_alert=True,
+        )
+        return
+
+    ahora = datetime.now(ZONA_HORARIA).strftime("%d/%m %H:%M")
+    try:
+        await query.answer(text=resultado[:200])
+        await query.edit_message_text(
+            text=f"{query.message.text}\n\n✅ Completada por {remitente}, {ahora}",
+            reply_markup=None,
+        )
+    except Exception:
+        logger.exception("Tarea '%s' completada, pero fallo actualizando el mensaje en Telegram.", tarea_id)
+
+
 async def confirmar_habito_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not is_chat_allowed(update):
@@ -1437,6 +1522,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(confirmar_pago_callback, pattern=r"^pago:"))
     application.add_handler(CallbackQueryHandler(confirmar_medicamento_callback, pattern=r"^medicamento:"))
     application.add_handler(CallbackQueryHandler(confirmar_habito_callback, pattern=r"^habito:"))
+    application.add_handler(CallbackQueryHandler(confirmar_tarea_callback, pattern=r"^tarea:"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(imagen_callback, pattern=r"^imagen:"))
     application.add_handler(CallbackQueryHandler(desactivar_habito_callback, pattern=r"^hbaja:"))
@@ -1469,6 +1555,12 @@ def main() -> None:
     logger.info(
         "Aviso de eventos de manana programado a las %s (sin poll; respaldo via actividad en el chat).",
         HORA_ALERTA_EVENTOS_MANANA,
+    )
+
+    application.job_queue.run_daily(seguimiento_tareas, time=HORA_SEGUIMIENTO_TAREAS)
+    logger.info(
+        "Seguimiento diario de tareas con fecha programado a las %s (sin poll; respaldo via actividad en el chat).",
+        HORA_SEGUIMIENTO_TAREAS,
     )
 
     # Jobs sin una sola hora fija (varias horas por fila, o fecha arbitraria):

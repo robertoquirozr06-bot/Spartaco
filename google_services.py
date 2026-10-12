@@ -437,6 +437,93 @@ async def completar_tarea(tarea_id: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Seguimiento diario de tareas con fecha
+#
+# El estado vive en la propia tarea de Google Tasks (su 'due' y su 'status'),
+# sin pestana aparte: "pasar al dia siguiente" es mover el due a hoy, y
+# completarla por cualquier via (boton, chat o la app de Google Tasks) la saca
+# del seguimiento. Cuantas veces se paso queda en una linea de las notas.
+# --------------------------------------------------------------------------
+
+_PATRON_REPROGRAMADA = re.compile(
+    r"^🔁 Reprogramada (\d+) (?:vez|veces) \(fecha original: (\d{4}-\d{2}-\d{2})\)$", re.MULTILINE
+)
+
+
+async def tareas_para_seguimiento(hoy_iso: str) -> list[dict]:
+    """Tareas pendientes con fecha de hoy o anterior, excluyendo '[Agente]'
+    (nadie las ejecuta solas). Uso interno del job seguimiento_tareas.
+
+    Pagina explicitamente: el default de la API es 20 tareas por pagina y una
+    lista con varios planes lo pasa facil.
+    """
+    if not TASKLIST_ID:
+        return []
+
+    _, tasks, _ = _client_apis()
+
+    def _listar_todas():
+        items, token = [], None
+        while True:
+            resultado = tasks.tasks().list(
+                tasklist=TASKLIST_ID, showCompleted=False, maxResults=100, pageToken=token
+            ).execute(num_retries=2)
+            items.extend(resultado.get("items", []))
+            token = resultado.get("nextPageToken")
+            if not token:
+                return items
+
+    items = await asyncio.to_thread(_listar_todas)
+    pendientes = []
+    for t in items:
+        due_iso = (t.get("due") or "")[:10]
+        titulo = t.get("title", "")
+        if not due_iso or due_iso > hoy_iso or titulo.startswith("[Agente]"):
+            continue
+        notas = t.get("notes", "") or ""
+        marca = _PATRON_REPROGRAMADA.search(notas)
+        pendientes.append({
+            "id": t["id"],
+            "titulo": titulo,
+            "due_iso": due_iso,
+            "notas": notas,
+            "veces_reprogramada": int(marca.group(1)) if marca else 0,
+            "fecha_original_iso": marca.group(2) if marca else due_iso,
+        })
+    pendientes.sort(key=lambda p: p["due_iso"])
+    return pendientes
+
+
+async def reprogramar_tarea(tarea_id: str, nuevo_due_iso: str, notas_actuales: str, due_actual_iso: str) -> int:
+    """Mueve el vencimiento de una tarea no completada y deja constancia en
+    sus notas (una sola linea '🔁 Reprogramada N veces', que se reemplaza en
+    vez de acumularse). Devuelve N.
+    """
+    _, tasks, _ = _client_apis()
+
+    marca = _PATRON_REPROGRAMADA.search(notas_actuales)
+    veces = (int(marca.group(1)) if marca else 0) + 1
+    fecha_original = marca.group(2) if marca else due_actual_iso
+    linea = f"🔁 Reprogramada {veces} {'vez' if veces == 1 else 'veces'} (fecha original: {fecha_original})"
+    if marca:
+        notas = _PATRON_REPROGRAMADA.sub(linea, notas_actuales, count=1)
+    else:
+        notas = f"{notas_actuales}\n{linea}" if notas_actuales else linea
+
+    def _patch():
+        # Un patch con valores absolutos es idempotente: reintentar no duplica nada.
+        return tasks.tasks().patch(
+            tasklist=TASKLIST_ID,
+            task=tarea_id,
+            body={"due": f"{nuevo_due_iso}T00:00:00.000Z", "notes": notas},
+        ).execute(num_retries=2)
+
+    await asyncio.to_thread(_patch)
+    logger.info("Tarea %s reprogramada a %s (%s vez/veces).", tarea_id, nuevo_due_iso, veces)
+    return veces
+
+
+# --------------------------------------------------------------------------
 # Planes de tareas (freno de codigo para pedidos de varios pasos)
 #
 # proponer_plan solo guarda los pasos en memoria y los muestra -- nunca toca
