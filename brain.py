@@ -138,6 +138,10 @@ SYSTEM_PROMPT = (
     "relativas ('mañana', 'el viernes', 'en dos horas') antes de llamar a una herramienta, y usa "
     "el nombre de quien escribe como 'registrado_por' al registrar un movimiento financiero. No "
     "repitas ese contexto en tu respuesta.\n\n"
+    "Si el contexto dice 'chat privado', hablas a solas con esa persona, no con el grupo. Los "
+    "datos son los mismos (el calendario, las tareas y las hojas son compartidos), pero los "
+    "avisos automaticos y las iniciativas que programes desde ahi llegan al grupo, no al chat "
+    "privado: si programas una, dilo asi.\n\n"
     "Tambien puedes gestionar pagos recurrentes mensuales (arriendo, suscripciones, servicios): "
     "agregarlos, listarlos, confirmarlos o pausarlos. Espartaco ya avisa solo por Telegram un dia "
     "antes y el mismo dia de vencimiento con un boton de confirmacion, asi que no necesitas crear "
@@ -962,13 +966,14 @@ def _recortar_historial(historial: list[dict]) -> None:
         del historial[:corte]
 
 
-def _contexto_temporal(remitente: str) -> str:
+def _contexto_temporal(remitente: str, privado: bool = False) -> str:
     ahora = datetime.now().astimezone()
     dia = _DIAS_SEMANA[ahora.weekday()]
     quien = f", escribe {remitente}" if remitente else ""
+    donde = ", por chat privado" if privado else ""
     return (
         f"[Contexto: hoy es {dia} {ahora.date().isoformat()}, son las "
-        f"{ahora.strftime('%H:%M')} ({ahora.isoformat(timespec='seconds')}){quien}]"
+        f"{ahora.strftime('%H:%M')} ({ahora.isoformat(timespec='seconds')}){quien}{donde}]"
     )
 
 
@@ -1017,12 +1022,13 @@ async def _ejecutar_tool(nombre: str, argumentos_json: str, chat_id: int) -> str
         return f"La herramienta '{nombre}' fallo inesperadamente."
 
 
-async def ask(chat_id: int, text: str, remitente: str = "") -> str:
+async def ask(chat_id: int, text: str, remitente: str = "", privado: bool = False) -> str:
     """Manda `text` al modelo dentro del historial de `chat_id` y devuelve la respuesta.
 
     `remitente` (nombre de quien escribio en Telegram) se agrega al contexto
     para que el modelo pueda usarlo, por ejemplo, al registrar un movimiento
-    financiero.
+    financiero. `privado` le avisa que habla 1 a 1 con esa persona y no en el
+    grupo.
 
     Nunca tarda mas de TIMEOUT_TOTAL_RESPUESTA_SEG: si se vence, se descarta lo
     que haya quedado a medias de este turno (un assistant con tool_calls sin
@@ -1033,7 +1039,7 @@ async def ask(chat_id: int, text: str, remitente: str = "") -> str:
         raise RuntimeError("brain.configure() debe llamarse antes de usar ask().")
 
     historial = _get_historial(chat_id)
-    entrada_usuario = {"role": "user", "content": f"{_contexto_temporal(remitente)}\n{text}"}
+    entrada_usuario = {"role": "user", "content": f"{_contexto_temporal(remitente, privado)}\n{text}"}
     historial.append(entrada_usuario)
     try:
         return await asyncio.wait_for(

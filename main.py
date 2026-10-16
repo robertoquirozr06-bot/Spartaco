@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ChatType
 from telegram.error import Conflict
 from telegram.ext import (
     ApplicationBuilder,
@@ -149,6 +149,13 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
 _raw_chat_id = os.getenv("ALLOWED_CHAT_ID", "").strip()
 ALLOWED_CHAT_ID = int(_raw_chat_id) if _raw_chat_id else None
 
+# Usuarios que pueden hablarle en privado (1 a 1), ademas del grupo: IDs
+# numericos de Telegram separados por coma. Vacio = solo el grupo. Es por
+# usuario y no por chat a proposito: cualquiera puede escribirle al bot.
+ALLOWED_PRIVATE_USER_IDS = {
+    int(x) for x in os.getenv("ALLOWED_PRIVATE_USER_IDS", "").split(",") if x.strip()
+}
+
 if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "PON_AQUI_TU_TOKEN_DE_BOTFATHER":
     logger.critical(
         "TELEGRAM_TOKEN no esta definido (o esta vacio) en %s. "
@@ -175,12 +182,23 @@ if ALLOWED_CHAT_ID is None:
     )
 else:
     logger.info("Restriccion de chat: %s", ALLOWED_CHAT_ID)
+    if ALLOWED_PRIVATE_USER_IDS:
+        logger.info("Chat privado habilitado para los usuarios: %s", sorted(ALLOWED_PRIVATE_USER_IDS))
 
 
 def is_chat_allowed(update: Update) -> bool:
     if ALLOWED_CHAT_ID is None:
         return False
-    return update.effective_chat is not None and update.effective_chat.id == ALLOWED_CHAT_ID
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    if chat.id == ALLOWED_CHAT_ID:
+        return True
+    # Solo el chat privado con el bot, nunca "cualquier chat donde escriba un
+    # usuario permitido": si alguien mete el bot en otro grupo y ese usuario
+    # escribe ahi, el bot le contaria las finanzas a todo ese grupo.
+    usuario = update.effective_user
+    return chat.type == ChatType.PRIVATE and usuario is not None and usuario.id in ALLOWED_PRIVATE_USER_IDS
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,7 +237,9 @@ async def _responder_con_cerebro(
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     try:
         async with _turno():
-            respuesta = await brain.ask(chat_id, texto, remitente=remitente)
+            respuesta = await brain.ask(
+                chat_id, texto, remitente=remitente, privado=chat_id != ALLOWED_CHAT_ID
+            )
     except Exception:
         logger.exception("Fallo al pedirle respuesta al cerebro - chat_id=%s", chat_id)
         await context.bot.send_message(chat_id=chat_id, text="Se me trabo el cerebro un segundo, intenta de nuevo.")
@@ -1192,7 +1212,19 @@ async def _recordatorio_eventos_2h_impl(context: ContextTypes.DEFAULT_TYPE) -> N
             logger.exception("Fallo enviando el recordatorio de 2h antes para el evento '%s'.", ev.get("id"))
 
 
-async def _ejecutar_iniciativa(ini: dict) -> str:
+def _chat_destino_iniciativa(chat_id_origen: int) -> int:
+    """Chat al que se manda una iniciativa vencida.
+
+    Las que se programaron desde el chat privado se avisan en el grupo, como
+    el resto de los recordatorios (decision del dueno, 2026-10-16). En
+    Telegram los chats privados tienen id positivo y los grupos negativo.
+    """
+    if chat_id_origen > 0 and ALLOWED_CHAT_ID is not None:
+        return ALLOWED_CHAT_ID
+    return chat_id_origen
+
+
+async def _ejecutar_iniciativa(ini: dict, chat_id: int) -> str:
     """Arma el mensaje a mandar para una iniciativa vencida, segun su tipo."""
     if ini["tipo_accion"] == "ideas_regalo":
         prompt = (
@@ -1202,7 +1234,7 @@ async def _ejecutar_iniciativa(ini: dict) -> str:
             "si te ayuda a dar opciones reales, con precio aproximado si es posible), en una lista "
             "corta y numerada. No preguntes nada, esto no es una conversacion en curso."
         )
-        respuesta = await brain.ask(ini["chat_id"], prompt)
+        respuesta = await brain.ask(chat_id, prompt)
         return f"💡 {ini['descripcion']} — se me ocurrieron estas ideas:\n{respuesta}"
 
     # recordatorio_generico (y cualquier tipo futuro sin manejo especifico todavia)
@@ -1222,8 +1254,9 @@ async def _revisar_iniciativas_proactivas_impl(context: ContextTypes.DEFAULT_TYP
     pendientes = await google_services.calcular_iniciativas_pendientes()
     for ini in pendientes:
         try:
-            texto = await _ejecutar_iniciativa(ini)
-            await context.bot.send_message(chat_id=ini["chat_id"], text=texto)
+            destino = _chat_destino_iniciativa(ini["chat_id"])
+            texto = await _ejecutar_iniciativa(ini, destino)
+            await context.bot.send_message(chat_id=destino, text=texto)
             await google_services.marcar_iniciativa_estado(ini["fila"], "enviado")
         except Exception:
             logger.exception("Fallo ejecutando la iniciativa '%s'.", ini.get("id"))

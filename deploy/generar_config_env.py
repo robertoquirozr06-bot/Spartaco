@@ -18,6 +18,7 @@ from dotenv import dotenv_values
 
 NO_SECRETAS = [
     "ALLOWED_CHAT_ID",
+    "ALLOWED_PRIVATE_USER_IDS",
     "DEEPSEEK_MODEL",
     "DEEPSEEK_FALLBACK_MODEL",
     "CALENDAR_ID",

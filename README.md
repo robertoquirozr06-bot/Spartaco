@@ -40,6 +40,7 @@ venv\Scripts\pip install -r requirements.txt      # Windows
 | Iniciativas (`INICIATIVAS_TAB`) | ID, ChatId, Descripcion, TipoAccion, FechaDisparo, Contexto, Estado |
 
 5. **Arranque**: `venv\Scripts\python.exe main.py`. La primera vez, escribe `/start` en el grupo y copia el `chat_id` que aparece en el log a `ALLOWED_CHAT_ID`. **Sin esa variable el bot no responde en ningún chat**, a propósito: así nadie más puede usarlo para leer tu calendario o tus finanzas.
+6. **Chat privado** (opcional): para hablarle al bot 1 a 1, escríbele `/start` en privado, copia el `chat_id` del log (en un chat privado es tu ID de usuario) a `ALLOWED_PRIVATE_USER_IDS` y reinicia. Puedes poner varios IDs separados por coma. El privado tiene su propia memoria de conversación, pero usa los mismos datos que el grupo, y los avisos automáticos y las iniciativas que se programen ahí llegan al grupo.
 
 ## Arranque automático en Windows (opcional)
 
@@ -91,7 +92,7 @@ docker run -d --name espartaco --restart=always \
 ## Seguridad
 
 - Los secretos viven en `.env`, `credentials.json` y `token.json`, que están en `.gitignore`. No los subas.
-- El bot solo atiende el chat de `ALLOWED_CHAT_ID`.
+- El bot solo atiende el chat de `ALLOWED_CHAT_ID` y los chats privados de los usuarios de `ALLOWED_PRIVATE_USER_IDS`. Esos usuarios no lo pueden usar en otros grupos.
 - `leer_pagina` solo abre URLs http/https que apuntan a IPs públicas (también en cada redirección), para que una página maliciosa no pueda usarlo para entrar a tu red local.
 - El texto de las páginas web llega al modelo. Las acciones de varios pasos que nacen de una búsqueda pasan por `proponer_plan`, que exige confirmación explícita antes de crear tareas, pero conviene tener presente que el contenido web no es de confianza.
 
