@@ -38,8 +38,9 @@ NOTAS_TAB = os.getenv("NOTAS_TAB", "Notas").strip() or "Notas"
 INICIATIVAS_TAB = os.getenv("INICIATIVAS_TAB", "Iniciativas").strip() or "Iniciativas"
 HABITOS_TAB = os.getenv("HABITOS_TAB", "Habitos").strip() or "Habitos"
 
-# "borrador_email" se agrega en la Fase 4 (integracion de Gmail) -- todavia no
-# hay ninguna herramienta que lo ejecute, asi que no se ofrece como opcion.
+# "borrador_email" queda pendiente: Gmail ya esta (gmail_tools.py), pero
+# _ejecutar_iniciativa en main.py todavia no sabe disparar un borrador, asi que
+# no se ofrece como opcion.
 TIPOS_INICIATIVA = ("ideas_regalo", "recordatorio_generico")
 DIAS_RETENCION_INICIATIVAS = 90
 
@@ -53,6 +54,7 @@ ZONA_HORARIA = ZoneInfo("America/Bogota")
 # retraso real) se marcaria como atrasada por error.
 MINUTOS_ATRASO_UMBRAL = 60
 
+_creds = None
 _calendar = None
 _tasks = None
 _sheets = None
@@ -100,8 +102,8 @@ def _authorized_http(creds):
     return AuthorizedHttp(creds, http=httplib2.Http(timeout=15))
 
 
-def _client_apis():
-    """Construye (una sola vez) los clientes de Calendar/Tasks/Sheets.
+def construir_servicio(api: str, version: str):
+    """Construye un cliente de una API de Google con un Http propio por peticion.
 
     httplib2.Http NO es thread-safe, y todas las llamadas corren en hilos de
     asyncio.to_thread que se solapan (un mensaje dispara en paralelo los jobs de
@@ -112,22 +114,28 @@ def _client_apis():
     proceso con 0xc0000374 / 0xc0000005. Por eso cada peticion recibe su
     propio Http via requestBuilder (el patron que documenta googleapiclient
     para hilos); los objetos de servicio si se comparten, son inmutables.
+
+    Todos los servicios comparten un mismo objeto de credenciales, para que
+    haya un solo refresh del token y una sola escritura de token.json.
     """
+    global _creds
+    if _creds is None:
+        _creds = get_credentials()
+    creds = _creds
+
+    def _request_con_http_propio(_http, *args, **kwargs):
+        return HttpRequest(_authorized_http(creds), *args, **kwargs)
+
+    return build(api, version, http=_authorized_http(creds), requestBuilder=_request_con_http_propio)
+
+
+def _client_apis():
+    """Construye (una sola vez) los clientes de Calendar/Tasks/Sheets."""
     global _calendar, _tasks, _sheets
     if _calendar is None:
-        creds = get_credentials()
-
-        def _request_con_http_propio(_http, *args, **kwargs):
-            return HttpRequest(_authorized_http(creds), *args, **kwargs)
-
-        def _build(api, version):
-            return build(
-                api, version, http=_authorized_http(creds), requestBuilder=_request_con_http_propio
-            )
-
-        _calendar = _build("calendar", "v3")
-        _tasks = _build("tasks", "v1")
-        _sheets = _build("sheets", "v4")
+        _calendar = construir_servicio("calendar", "v3")
+        _tasks = construir_servicio("tasks", "v1")
+        _sheets = construir_servicio("sheets", "v4")
     return _calendar, _tasks, _sheets
 
 

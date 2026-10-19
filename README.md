@@ -5,6 +5,7 @@ Asistente personal y administrativo para un grupo de Telegram (pensado para una 
 - **Google Calendar**: crear y consultar eventos, con aviso diario de la agenda y recordatorios el día antes y 2 horas antes.
 - **Google Tasks**: tareas delegadas con etiquetas (`[Agente]`, `[Roberto]`, `[Leidy]`) y agrupación por proyecto.
 - **Google Sheets** como base de datos: gastos e ingresos, resúmenes y comparación entre meses, pagos recurrentes con recordatorio de vencimiento, medicamentos y hábitos con botón de confirmación, notas de largo plazo y recordatorios programados a futuro.
+- **Gmail**: buscar y leer correos, ordenarlos con etiquetas y redactar borradores (respuestas en el mismo hilo o correos nuevos). Nunca envía ni borra: los borradores se revisan y se envían desde Gmail.
 - **Internet**: búsqueda general vía [Tavily](https://tavily.com), negocios y lugares de Google Maps (dirección, teléfono, calificación, horario) vía [Serper.dev](https://serper.dev), y lectura de páginas.
 - **Fotos**: lee una imagen (cita, receta, invitación) y ofrece agendarla o crear un recordatorio, siempre con confirmación.
 
@@ -14,7 +15,7 @@ El razonamiento lo hace un modelo de [DeepSeek](https://api-docs.deepseek.com/) 
 
 - Python 3.12 o superior (desarrollado con 3.14).
 - Un bot de Telegram (créalo con [@BotFather](https://t.me/BotFather)) agregado a tu grupo.
-- Un proyecto de Google Cloud con las APIs de Calendar, Tasks y Sheets habilitadas y un cliente OAuth de tipo **escritorio**.
+- Un proyecto de Google Cloud con las APIs de Calendar, Tasks, Sheets y Gmail habilitadas y un cliente OAuth de tipo **escritorio**.
 - Una API key de DeepSeek y, opcionalmente, una de Tavily (búsqueda web) y una de Serper.dev (Google Maps). Las dos tienen plan gratis sin tarjeta: Tavily da 1.000 búsquedas al mes que se renuevan, y Serper 2.500 en total, una sola vez. Sin estas keys, las herramientas de búsqueda avisan que falta configurarlas y el resto del bot funciona igual.
 
 ## Instalación
@@ -26,7 +27,7 @@ venv\Scripts\pip install -r requirements.txt      # Windows
 ```
 
 1. **Configuración**: copia `.env.example` a `.env` y completa los valores.
-2. **Google**: descarga el JSON del cliente OAuth como `credentials.json` en esta carpeta y corre `python google_auth.py` una vez. Se abre el navegador para autorizar y queda un `token.json`.
+2. **Google**: descarga el JSON del cliente OAuth como `credentials.json` en esta carpeta y corre `python google_auth.py` una vez. Se abre el navegador para autorizar y queda un `token.json`. Para volver a autorizar con un token ya existente (por ejemplo, si cambian los permisos), usa `python google_auth.py --reautorizar`.
 3. **Contexto de tu familia** (opcional): copia `contexto_familia.example.md` a `contexto_familia.md` y escribe ahí nombres, quién comparte qué gastos, tratamientos, etc. Se agrega al prompt del sistema y no se versiona.
 4. **Hoja de cálculo**: crea las pestañas que vayas a usar con estos encabezados en la fila 1:
 
